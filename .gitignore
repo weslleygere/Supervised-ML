@@ -3,6 +3,9 @@ venv/
 .venv/
 env/
 
+# Configurações de ambiente
+.env
+
 # Dados sensíveis
 data/raw/
 

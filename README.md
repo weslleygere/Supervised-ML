@@ -142,7 +142,7 @@ Example `schema.json`:
 ```json
 {
   "target": {
-    "names": ["target_column"]
+    "names": ["target_column_1", "target_column_2"]
   },
   "features": [
     {
@@ -224,4 +224,3 @@ DEBUG=false
 - **Other Temporary Outputs**  
   Depending on the models used, additional folders may be generated:
   - `__pycache__/`: Auto-generated Python bytecode; can be ignored or deleted.
-  
