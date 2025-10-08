@@ -1,0 +1,27 @@
+# Ambientes virtuais
+venv/
+.venv/
+env/
+
+# Dados sensíveis
+data/raw/
+
+# Cache Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs e outputs
+*.log
+output/
+
+# Arquivos temporários
+*.tmp
+*.temp
+
+# VS Code
+.vscode/
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
