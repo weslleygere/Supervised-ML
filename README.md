@@ -5,11 +5,11 @@ This project implements a modular and extensible pipeline for conducting **super
 ## Table of Contents
 
 1. [Project Structure](#project-structure)
-4. [Installation](#installation)
+2. [Installation](#installation)
    - [Local Setup](#local-setup)
-5. [Configuration and Schema](#configuration-and-schema)
-6. [Running the Pipeline](#running-the-pipeline)
-7. [Output and Logs](#output-and-logs)
+3. [Configuration and Schema](#configuration-and-schema)
+4. [Running the Pipeline](#running-the-pipeline)
+5. [Output and Logs](#output-and-logs)
 
 ---
 
@@ -224,3 +224,4 @@ DEBUG=false
 - **Other Temporary Outputs**  
   Depending on the models used, additional folders may be generated:
   - `__pycache__/`: Auto-generated Python bytecode; can be ignored or deleted.
+  
