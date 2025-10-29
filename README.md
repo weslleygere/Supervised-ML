@@ -155,7 +155,7 @@ Example `schema.json`:
     },
     {
       "name": "categorical_feature",
-      "type": "categorical"
+      "type": "numerical"
     },
     {
       "name": "id_column",
