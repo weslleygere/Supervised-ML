@@ -32,25 +32,26 @@ This project implements a modular and extensible pipeline for conducting **super
 │       ├── eval_times_*.png    # Execution time charts(PNG)
 │       ├── eval_summary.csv    # Tabular summary of evaluation metrics
 │       └── experiment.log      # Execution log file
-└── src/                        # Main source code
-    ├── pipeline.py             # Orchestrator class coordinating all training pipeline steps
-    ├── config/                 # System configurations
-    │   ├── logging.py          # Logging configuration
-    │   └── settings.py         # General settings
-    ├── core/                   # Core modules
-    │   ├── data/               # Data management
-    │   │   ├── data_loader.py  # Functions for loading and managing datasets
-    │   │   └── schema.py       # Schema definitions and validation
-    │   ├── evaluation/         # Model evaluation
-    │   │   ├── decorator.py    # Evaluation decorators
-    │   │   ├── evaluator.py    # Metric calculation and evaluation
-    │   │   └── plots.py        # Chart and visualization generation
-    │   ├── models/             # Model definitions and factory
-    │   │   ├── definitions.py  # Base model definitions
-    │   │   └── factory.py      # Factory for building model instances
-    │   └── processors/         # Data processing
-    │       ├── presplit.py     # Preprocessing steps before dataset splitting
-    │       └── postsplit.py    # Transformations applied after data splitting
+├── src/                        # Main source code
+│   ├── pipeline.py             # Orchestrator class coordinating all training pipeline steps
+│   ├── config/                 # System configurations
+│   │   ├── logging.py          # Logging configuration
+│   │   └── settings.py         # General settings
+│   └── core/                   # Core modules
+│       ├── data/               # Data management
+│       │   ├── data_loader.py  # Functions for loading and managing datasets
+│       │   └── schema.py       # Schema definitions and validation
+│       ├── evaluation/         # Model evaluation
+│       │   ├── decorator.py    # Evaluation decorators
+│       │   ├── evaluator.py    # Metric calculation and evaluation
+│       │   └── plots.py        # Chart and visualization generation
+│       ├── models/             # Model definitions and factory
+│       │   ├── definitions.py  # Base model definitions
+│       │   └── factory.py      # Factory for building model instances
+│       └── processors/         # Data processing
+│           ├── presplit.py     # Preprocessing steps before dataset splitting
+│           └── postsplit.py    # Transformations applied after data splitting
+└── README.md                   # This file
 ```
 
 After running the pipeline, the following will be created:
