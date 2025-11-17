@@ -5,6 +5,7 @@ import logging
 import platform
 from logging import Filter
 from datetime import datetime
+from src.config.settings import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,11 @@ class LogSetup:
 
     Parameters
     ----------
+    settings : Settings
+        Configuration settings object containing logging and data parameters.
+
+    Attributes
+    ----------
     log_level : str
         Desired log level for console output (e.g., 'DEBUG', 'INFO', 'WARNING').
     debug_mode : bool
@@ -51,10 +57,10 @@ class LogSetup:
         Directory to move the log file to after execution, if specified.
     """
 
-    def __init__(self, log_level: str, debug_mode: bool, output_dir: str):
-        self.log_level  = log_level
-        self.debug_mode = debug_mode
-        self.output_dir = output_dir
+    def __init__(self, settings: "Settings") -> None:
+        self.log_level  = settings.logging.log_level
+        self.debug_mode = settings.logging.debug
+        self.output_dir = settings.data.output_dir
 
     def setup_logging(self) -> None:
         """
@@ -125,3 +131,4 @@ class LogSetup:
                 shutil.move(LOG_PATH, os.path.join(self.output_dir, os.path.basename(LOG_PATH)))
             except Exception as e:
                 logger.warning(f"Could not move log file to output directory: {e}")
+                

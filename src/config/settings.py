@@ -132,6 +132,9 @@ class ModelConfig:
         self.models = self._parse_models(self.models_config)
         self._validate_random_state(self.random_state)
 
+        from src.core.models.definitions import AbstractModel
+        AbstractModel.seed = self.random_state
+
     @classmethod
     def from_env(cls) -> "ModelConfig":
         """

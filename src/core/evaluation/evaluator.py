@@ -347,7 +347,7 @@ class ModelEvaluator:
             X_train, y_train = post_split_processor.fit_transform(X_train, y_train)
             X_test = post_split_processor.transform(X_test)
 
-            model_instance = ModelFactory.create_model(regressor, self.random_state)
+            model_instance = ModelFactory.create_model(regressor)
             fit_time = model_instance.fit(X_train, y_train)
             y_pred, prediction_time = model_instance.predict(X_test)
             y_pred = post_split_processor.inverse_transform_target(y_pred)

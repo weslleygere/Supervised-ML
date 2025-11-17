@@ -1,11 +1,8 @@
 import logging
-import pandas as pd
-from typing import List
-from .core.data.schema import Schema
 from .core.data.data_loader import DataLoader
-from .core.models.factory import RegressionModels
 from .core.evaluation.evaluator import ModelEvaluator
 from .core.processors.presplit import PreSplitProcessor
+from .config.settings import Settings
 
 logger = logging.getLogger(__name__)
 
@@ -17,35 +14,14 @@ class Pipeline:
     - Model evaluation
 
     Parameters
-    -----------
-    data_path : str
-        Path to the input dataset.
-    schema_path : str
-        Path to the JSON schema defining the dataset structure.
-    output_dir : str
-        Directory where evaluation outputs and logs will be stored.
-    models : list[RegressionModels]
-        List of models to evaluate.
-    random_state : int
-        Random seed for reproducibility.
-    n_splits : int
-        Number of cross-validation folds.
+    ----------
+    settings : Settings
+        Configuration settings object containing data paths, model parameters, and evaluation settings.
     """
-    def __init__(self, 
-                 data_path: str, 
-                 schema_path: str, 
-                 output_dir: str,
-                 models: List[RegressionModels],
-                 random_state: int,
-                 n_splits: int) -> None:
-        self.data_path    = data_path
-        self.schema_path  = schema_path
-        self.output_dir   = output_dir
-        self.models       = models
-        self.random_state = random_state
-        self.n_splits     = n_splits
+    def __init__(self, settings: "Settings") -> None:
+        self.settings = settings
 
-    def run(self) -> tuple[pd.DataFrame, Schema]:
+    def run(self) -> None:
         """
         Execute the full pipeline:
         1. Load data and schema.
@@ -55,7 +31,10 @@ class Pipeline:
         Logs each step of the process for traceability and debugging.
         """
         # Step 1: Load raw data and schema
-        loader = DataLoader(self.data_path, self.schema_path)
+        loader = DataLoader(
+            data_path=self.settings.data.data_path,
+            schema_path=self.settings.data.schema_path
+        )
         df_raw = loader.load_data()
         schema = loader.load_schema()
         logger.info(f"Data loaded successfully with shape {df_raw.shape}")
@@ -66,7 +45,12 @@ class Pipeline:
         logger.info(f"Data preprocessed successfully with shape {df_processed.shape}")
 
         # Step 3: Evaluate models
-        evaluator = ModelEvaluator(schema, self.output_dir, self.models, self.random_state, self.n_splits)
-        evaluator.evaluate(df_processed)
+        evaluator = ModelEvaluator(
+            schema = schema,
+            output_dir=self.settings.data.output_dir,
+            models = self.settings.model.models,
+            random_state= self.settings.model.random_state,
+            n_splits= self.settings.validation.n_splits
+        )
 
-        return df_raw, schema
+        evaluator.evaluate(df_processed)

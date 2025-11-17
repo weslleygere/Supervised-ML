@@ -1,6 +1,7 @@
 import time
 import torch
 import pandas as pd
+from typing import Optional
 from sklearn.svm import SVR
 from sklearn.tree import DecisionTreeRegressor
 from sklearn.neural_network import MLPRegressor
@@ -17,19 +18,18 @@ class AbstractModel:
     """
     Abstract base class for all model implementations.
 
-    Parameters
-    ----------
-    seed : int
-        Random seed for reproducibility.
-    
     Attributes
     ----------
+    seed : int
+        Global random seed for reproducibility, set externally via configuration.
     device : str
         Indicates 'cuda' if a compatible GPU is detected by PyTorch, otherwise 'cpu'.
     """
-    def __init__(self, seed: int) -> None:
-        self.seed   : int = seed
-        self.device : str = 'cuda' if torch.cuda.is_available() else 'cpu'
+    seed: Optional[int] = None
+    device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    def __init__(self) -> None:
+        pass
 
     def fit(self, x: pd.DataFrame, y: pd.DataFrame) -> float:
         """
@@ -107,8 +107,8 @@ class AbstractModel:
 
 class LinearRegressionModel(AbstractModel):
     """Linear Regression Model."""
-    def __init__(self, seed: int) -> None:
-        super().__init__(seed)
+    def __init__(self) -> None:
+        super().__init__()
         self.model = MultiOutputRegressor(LinearRegression())
 
     def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
@@ -120,9 +120,9 @@ class LinearRegressionModel(AbstractModel):
 
 class RidgeRegressionModel(AbstractModel):
     """Ridge Regression Model."""
-    def __init__(self, seed: int) -> None:
-        super().__init__(seed)
-        self.model = MultiOutputRegressor(Ridge(random_state=self.seed))
+    def __init__(self) -> None:
+        super().__init__()
+        self.model = MultiOutputRegressor(Ridge(random_state=AbstractModel.seed))
 
     def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
         self.model.fit(x, y)
@@ -133,9 +133,9 @@ class RidgeRegressionModel(AbstractModel):
 
 class LassoRegressionModel(AbstractModel):
     """Lasso Regression Model."""
-    def __init__(self, seed: int) -> None:
-        super().__init__(seed)
-        self.model = MultiOutputRegressor(Lasso(random_state=self.seed))
+    def __init__(self) -> None:
+        super().__init__()
+        self.model = MultiOutputRegressor(Lasso(random_state=AbstractModel.seed))
 
     def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
         self.model.fit(x, y)
@@ -146,9 +146,9 @@ class LassoRegressionModel(AbstractModel):
 
 class ElasticNetModel(AbstractModel):
     """ElasticNet Regression Model."""
-    def __init__(self, seed: int) -> None:
-        super().__init__(seed)
-        self.model = MultiOutputRegressor(ElasticNet(random_state=self.seed))
+    def __init__(self) -> None:
+        super().__init__()
+        self.model = MultiOutputRegressor(ElasticNet(random_state=AbstractModel.seed))
 
     def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
         self.model.fit(x, y)
@@ -159,8 +159,8 @@ class ElasticNetModel(AbstractModel):
 
 class PLSRegressorModel(AbstractModel):
     """Partial Least Squares Regressor model."""
-    def __init__(self, seed: int) -> None:
-        super().__init__(seed)
+    def __init__(self) -> None:
+        super().__init__()
         self.model = PLSRegression(n_components=2)
 
     def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
@@ -175,8 +175,8 @@ class PLSRegressorModel(AbstractModel):
 
 class KNeighborsModel(AbstractModel):
     """K-Nearest Neighbors Regressor."""
-    def __init__(self, seed: int) -> None:
-        super().__init__(seed)
+    def __init__(self) -> None:
+        super().__init__()
         self.model = MultiOutputRegressor(KNeighborsRegressor())
 
     def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
@@ -191,9 +191,9 @@ class KNeighborsModel(AbstractModel):
     
 class DecisionTreeModel(AbstractModel):
     """Decision Tree Regressor."""
-    def __init__(self, seed: int) -> None:
-        super().__init__(seed)
-        self.model = MultiOutputRegressor(DecisionTreeRegressor(random_state=self.seed))
+    def __init__(self) -> None:
+        super().__init__()
+        self.model = MultiOutputRegressor(DecisionTreeRegressor(random_state=AbstractModel.seed))
 
     def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
         self.model.fit(x, y)
@@ -204,9 +204,9 @@ class DecisionTreeModel(AbstractModel):
 
 class RandomForestModel(AbstractModel):
     """Random Forest Regressor model."""
-    def __init__(self, seed: int) -> None:
-        super().__init__(seed)
-        self.model = RandomForestRegressor(random_state=self.seed)
+    def __init__(self) -> None:
+        super().__init__()
+        self.model = RandomForestRegressor(random_state=AbstractModel.seed)
 
     def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
         self.model.fit(x, y)
@@ -217,9 +217,9 @@ class RandomForestModel(AbstractModel):
 
 class ExtraTreesModel(AbstractModel):
     """Extra Trees Regressor."""
-    def __init__(self, seed: int) -> None:
-        super().__init__(seed)
-        self.model = MultiOutputRegressor(ExtraTreesRegressor(random_state=self.seed))
+    def __init__(self) -> None:
+        super().__init__()
+        self.model = MultiOutputRegressor(ExtraTreesRegressor(random_state=AbstractModel.seed))
 
     def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
         self.model.fit(x, y)
@@ -230,9 +230,9 @@ class ExtraTreesModel(AbstractModel):
 
 class AdaBoostModel(AbstractModel):
     """AdaBoost Regressor."""
-    def __init__(self, seed: int) -> None:
-        super().__init__(seed)
-        self.model = MultiOutputRegressor(AdaBoostRegressor(random_state=self.seed))
+    def __init__(self) -> None:
+        super().__init__()
+        self.model = MultiOutputRegressor(AdaBoostRegressor(random_state=AbstractModel.seed))
 
     def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
         self.model.fit(x, y)
@@ -243,9 +243,9 @@ class AdaBoostModel(AbstractModel):
 
 class XGBoostModel(AbstractModel):
     """XGBoost Regressor model."""
-    def __init__(self, seed: int) -> None:
-        super().__init__(seed)
-        self.model = XGBRegressor(random_state=self.seed)
+    def __init__(self) -> None:
+        super().__init__()
+        self.model = XGBRegressor(random_state=AbstractModel.seed)
 
     def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
         self.model.fit(x, y)
@@ -256,9 +256,9 @@ class XGBoostModel(AbstractModel):
 
 class LightGBMModel(AbstractModel):
     """LightGBM Regressor."""
-    def __init__(self, seed: int) -> None:
-        super().__init__(seed)
-        self.model = MultiOutputRegressor(LGBMRegressor(random_state=self.seed, verbosity=-1)) # type: ignore
+    def __init__(self) -> None:
+        super().__init__()
+        self.model = MultiOutputRegressor(LGBMRegressor(random_state=AbstractModel.seed, verbosity=-1)) # type: ignore
 
     def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
         self.model.fit(x, y)
@@ -269,9 +269,9 @@ class LightGBMModel(AbstractModel):
 
 class CatBoostModel(AbstractModel):
     """CatBoost Regressor."""
-    def __init__(self, seed: int) -> None:
-        super().__init__(seed)
-        self.model = MultiOutputRegressor(CatBoostRegressor(verbose=0, random_state=self.seed)) # type: ignore
+    def __init__(self) -> None:
+        super().__init__()
+        self.model = MultiOutputRegressor(CatBoostRegressor(verbose=0, random_state=AbstractModel.seed)) # type: ignore
 
     def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
         self.model.fit(x, y)
@@ -285,8 +285,8 @@ class CatBoostModel(AbstractModel):
 
 class SVRModel(AbstractModel):
     """Support Vector Regressor."""
-    def __init__(self, seed: int) -> None:
-        super().__init__(seed)
+    def __init__(self) -> None:
+        super().__init__()
         self.model = MultiOutputRegressor(SVR())
 
     def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
@@ -301,9 +301,9 @@ class SVRModel(AbstractModel):
 
 class MLPModel(AbstractModel):
     """Multilayer Perceptron Regressor."""
-    def __init__(self, seed: int) -> None:
-        super().__init__(seed)
-        self.model = MultiOutputRegressor(MLPRegressor(random_state=self.seed, 
+    def __init__(self) -> None:
+        super().__init__()
+        self.model = MultiOutputRegressor(MLPRegressor(random_state=AbstractModel.seed, 
                                                        hidden_layer_sizes=(8, 6),
                                                        activation='tanh',
                                                        solver='adam',

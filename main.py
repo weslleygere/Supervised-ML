@@ -14,11 +14,7 @@ def main() -> None:
     3. Run the pipeline.
     """
 
-    logging_setup = LogSetup(
-        log_level=settings.logging.log_level,
-        debug_mode=settings.logging.debug,
-        output_dir=settings.data.output_dir
-    )
+    logging_setup = LogSetup(settings = settings)
     logging_setup.setup_logging()
     
     logger = logging.getLogger(__name__)
@@ -27,14 +23,7 @@ def main() -> None:
     try:
         logging_setup.write_log_metadata()
 
-        pipeline = Pipeline(
-            data_path=settings.data.data_path,
-            schema_path=settings.data.schema_path,
-            output_dir=settings.data.output_dir,
-            models=settings.model.models,
-            random_state=settings.model.random_state,
-            n_splits=settings.validation.n_splits
-        )
+        pipeline = Pipeline(settings = settings)
         pipeline.run()
         logger.info(f"Evaluation complete. Results saved to {settings.data.output_dir}")
     

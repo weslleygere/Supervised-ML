@@ -31,7 +31,7 @@ class ModelFactory:
     """
     
     @staticmethod
-    def create_model(model: RegressionModels, seed: int) -> AbstractModel:
+    def create_model(model: RegressionModels) -> AbstractModel:
         """
         Create and return an instance of a model corresponding to the given enum member.
         
@@ -49,32 +49,32 @@ class ModelFactory:
         """
         match model:
             case RegressionModels.LINEAR_REGRESSION:
-                return LinearRegressionModel(seed)
+                return LinearRegressionModel()
             case RegressionModels.RIDGE_REGRESSION:
-                return RidgeRegressionModel(seed)
+                return RidgeRegressionModel()
             case RegressionModels.LASSO_REGRESSION:
-                return LassoRegressionModel(seed)
+                return LassoRegressionModel()
             case RegressionModels.ELASTIC_NET:
-                return ElasticNetModel(seed)
+                return ElasticNetModel()
             case RegressionModels.PLS:
-                return PLSRegressorModel(seed)
+                return PLSRegressorModel()
             case RegressionModels.K_NEIGHBORS:
-                return KNeighborsModel(seed)
+                return KNeighborsModel()
             case RegressionModels.DECISION_TREE:
-                return DecisionTreeModel(seed)
+                return DecisionTreeModel()
             case RegressionModels.RANDOM_FOREST:
-                return RandomForestModel(seed)
+                return RandomForestModel()
             case RegressionModels.EXTRA_TREES:
-                return ExtraTreesModel(seed)
+                return ExtraTreesModel()
             case RegressionModels.ADABOOST:
-                return AdaBoostModel(seed)
+                return AdaBoostModel()
             case RegressionModels.XGBOOST:
-                return XGBoostModel(seed)
+                return XGBoostModel()
             case RegressionModels.LIGHTGBM:
-                return LightGBMModel(seed)
+                return LightGBMModel()
             case RegressionModels.CATBOOST:
-                return CatBoostModel(seed)
+                return CatBoostModel()
             case RegressionModels.SVR:
-                return SVRModel(seed)
+                return SVRModel()
             case RegressionModels.MLP:
-                return MLPModel(seed)
+                return MLPModel()
