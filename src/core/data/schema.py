@@ -1,49 +1,76 @@
+from dataclasses import dataclass
 from typing import List, Literal, Dict, Any, ClassVar
 
-from dataclasses import dataclass
 
 @dataclass
 class TargetSchema:
     """
-    Dataclass representing the target variable(s) schema.
+    Dataclass representing the schema of the target variable(s).
 
     Parameters
     ----------
-    names : List[str]
-        List of column names that are considered target variables.
+    name : str
+        Name of the target column.
+    type : Literal['numerical']
+        Type of the target variable.
     """
-    names: List[str]
+    VALID_TYPES : ClassVar[tuple[str, ...]] = ("numerical",)
+
+    name: str
+    type: Literal["numerical"]
 
     def __post_init__(self) -> None:
-        """Validate that target names is a non-empty list."""
-        if not isinstance(self.names, list) or not self.names:
-            raise ValueError("Target 'names' must be a non-empty list.")
+        """Validate target fields."""
+        self._validate_name()
+        self._validate_type()
+
+    def _validate_name(self) -> None:
+        """Validate that the target name is not empty."""
+        if not self.name.strip():
+            raise ValueError("Target name cannot be an empty string.")
+
+    def _validate_type(self) -> None:
+        """Validate that the target type is valid."""
+        if self.type not in self.VALID_TYPES:
+            raise ValueError(
+                f"Invalid target type '{self.type}' for target '{self.name}'. "
+                f"Valid types: {', '.join(self.VALID_TYPES)}"
+            )
 
 
 @dataclass
 class FeatureSchema:
     """
-    Dataclass representing the schema of a single feature.
+    Dataclass representing the schema of a feature column.
 
     Parameters
     ----------
     name : str
         Name of the feature column.
     type : Literal['numerical', 'ignore']
-        Type of the feature. Must be either 'numerical' or 'ignore'.
+        Type of the feature variable.
     """
-    VALID_TYPES: ClassVar[tuple[str, ...]] = ("numerical", "ignore")
+    VALID_TYPES: ClassVar[tuple[str, ...]] = ("numerical", "ignore", "id")
 
-    name : str
-    type : Literal["numerical", "ignore"]
+    name: str
+    type: Literal["numerical", "ignore", "id"]
 
     def __post_init__(self) -> None:
-        """Validate that feature type is one of the accepted values."""
+        """Validate feature fields."""
+        self._validate_name()
+        self._validate_type()
+    
+    def _validate_name(self) -> None:
+        """Validate that the feature name is not empty."""
+        if not self.name.strip():
+            raise ValueError("Feature name cannot be an empty string.")
+    
+    def _validate_type(self) -> None:
+        """Validate that the feature type is valid."""
         if self.type not in self.VALID_TYPES:
-            valid = ", ".join(self.VALID_TYPES)
             raise ValueError(
                 f"Invalid feature type '{self.type}' for feature '{self.name}'. "
-                f"Valid types: {valid}"
+                f"Valid types: {', '.join(self.VALID_TYPES)}"
             )
 
 
@@ -59,55 +86,127 @@ class Schema:
     features : List[FeatureSchema]
         List of schema definitions for each feature column.
     """
-    target   : TargetSchema
-    features : List[FeatureSchema]
+    target  : List[TargetSchema]
+    features: List[FeatureSchema]
 
     def __post_init__(self) -> None:
-        """Validate the schema for consistency and completeness."""
-        if not self.features:
-            raise ValueError("At least one feature must be provided")
-        
-        feature_names = [f.name for f in self.features]
-        all_names = feature_names + self.target.names
-        
-        unique_names = set(all_names)
-        if len(all_names) != len(unique_names):
-            duplicates = [name for name in unique_names if all_names.count(name) > 1]
-            raise ValueError(f"Duplicate names found: {', '.join(sorted(duplicates))}")
-        
-        target_set = set(self.target.names)
-        feature_set = set(feature_names)
-        overlap = target_set & feature_set
-        
-        if overlap:
-            raise ValueError(f"Target columns cannot be features: {', '.join(sorted(overlap))}")
+        """Validate schema integrity."""
+        self._validate_no_duplicate_names()
+        self._validate_no_target_feature_overlap()
 
     @classmethod
     def from_dict(cls, schema_dict: Dict[str, Any]) -> "Schema":
         """
-        Create a Schema instance from a dictionary.
+        Create a Schema instance from a dictionary (parsed from JSON schema file).
 
         Parameters
         ----------
         schema_dict : Dict[str, Any]
-            Dictionary containing the schema definition with "target" and "features" keys.
+            Dictionary representation of the schema.
 
         Returns
         -------
-        schema : Schema
-            Instantiated Schema object containing target and feature definitions based on the provided dictionary.
+        Schema
+            Instantiated Schema object.
         """
         try:
-            target = TargetSchema(names=schema_dict["target"]["names"])
+            target = [
+                TargetSchema(
+                    name=entry["name"],
+                    type=entry["type"]
+                )
+                for entry in schema_dict["targets"]
+            ]
             
             features = [
-                FeatureSchema(name=entry["name"], type=entry["type"])
+                FeatureSchema(
+                    name=entry["name"],
+                    type=entry["type"]
+                )
                 for entry in schema_dict["features"]
             ]
             
             return cls(target=target, features=features)
             
         except KeyError as e:
-            raise ValueError(f"Missing required key in schema") from e
+            raise ValueError(f"Missing key in schema entry: {e}") from e
+
         except Exception as e:
-            raise ValueError(f"Invalid schema structure") from e
+            raise ValueError(f"Invalid schema structure: {e}") from e
+        
+    @property
+    def target_names(self) -> List[str]:
+        """
+        Get all target names.
+        
+        Returns
+        -------
+        List[str]
+            List of target names.
+        """
+        return [t.name for t in self.target]
+    
+    @property
+    def feature_names(self) -> List[str]:
+        """
+        Get all feature names.
+        
+        Returns
+        -------
+        List[str]
+            List of feature names.
+        """
+        return [f.name for f in self.features]
+    
+    @property
+    def valid_feature_names(self) -> List[str]:
+        """
+        Get all feature names that are not 'ignore' or 'id'.
+        
+        Returns
+        -------
+        List[str]
+            List of valid feature names.
+        """
+        return [f.name for f in self.features if f.type not in ("ignore", "id")]
+    
+    @property
+    def valid_feature_names_id(self) -> List[str]:
+        """
+        Get all feature names that are not 'ignore'.
+        
+        Returns
+        -------
+        List[str]
+            List of valid feature names.
+        """
+        return [f.name for f in self.features if f.type not in "ignore"]
+    
+    @property
+    def ignored_feature_names(self) -> List[str]:
+        """
+        Get all feature names that are 'ignore'.
+        
+        Returns
+        -------
+        List[str]
+            List of ignored feature names.
+        """
+        return [f.name for f in self.features if f.type == "ignore"]
+        
+    def _validate_no_duplicate_names(self) -> None:
+        """Ensure there are no duplicate names among targets and features."""
+        all_names = [t.name for t in self.target] + [f.name for f in self.features]
+        duplicates = {name for name in all_names if all_names.count(name) > 1}
+        if duplicates:
+            raise ValueError(f"Duplicate names found in schema: {', '.join(duplicates)}")
+        
+    def _validate_no_target_feature_overlap(self) -> None:
+        """Ensure that target names do not overlap with feature names."""
+        target_names = {t.name for t in self.target}
+        feature_names = {f.name for f in self.features}
+        overlap = target_names.intersection(feature_names)
+        if overlap:
+            raise ValueError(
+                f"Target and feature names overlap: {', '.join(overlap)}"
+            )

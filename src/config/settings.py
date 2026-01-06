@@ -1,11 +1,12 @@
 import os
 from typing import List
 from datetime import datetime
-from src.core.models.factory import RegressionModels 
-
 from dataclasses import dataclass, field
 
 from decouple import config
+
+from src.core.models.factory import RegressionModels 
+
 
 @dataclass
 class DataConfig:
@@ -24,24 +25,26 @@ class DataConfig:
     Attributes
     ----------
     output_dir : str
-        Timestamped directory created within `output_dir_base` for saving outputs.
+        Timestamped directory created within `output_dir_base` to store results.
     """
-    data_path       : str
-    schema_path     : str
-    output_dir_base : str
-    output_dir      : str = field(init=False)
+    DATA_EXTENSIONS = frozenset({"csv", "xlsx", "parquet", "json"})
+
+    data_path      : str
+    schema_path    : str
+    output_dir_base: str
+    output_dir     : str = field(init=False)
 
     def __post_init__(self) -> None:
-        """Validate paths after initialization."""
-        self._validate_file(self.data_path)
-        self._validate_file(self.schema_path)
-        self._validate_directory(self.output_dir_base)
-        self.output_dir = self._create_output_dir(self.output_dir_base)
+        """Validate input paths and initialize the timestamped output directory."""
+        self._validate_dataset_file()
+        self._validate_schema_file()
+        self._validate_output_base()
+        self.output_dir = self._create_output_dir()
 
     @classmethod
-    def from_env(cls) -> 'DataConfig':
+    def from_env(cls) -> "DataConfig":
         """
-        Load data configuration from environment variables.
+        Load configuration settings from environment variables.
 
         Returns
         -------
@@ -53,52 +56,45 @@ class DataConfig:
             schema_path     = str(config('SCHEMA_PATH', default='data/schema/schema.json')),
             output_dir_base = str(config('OUTPUT_DIR', default='output'))
         )
-    
-    @staticmethod
-    def _validate_file(file_path: str) -> None:
-        """
-        Validate that a file exists at the given path.
+
+    def _validate_dataset_file(self) -> None:
+        """Validate that the dataset file exists and has a supported extension."""
+        if not os.path.isfile(self.data_path):
+            raise FileNotFoundError(f"Dataset file not found: {self.data_path}")
+
+        ext = self.data_path.split(".")[-1].lower()
+        if ext not in DataConfig.DATA_EXTENSIONS:
+            allowed = ", ".join(sorted(DataConfig.DATA_EXTENSIONS))
+            raise ValueError(
+                f"Unsupported dataset extension '.{ext}'. Allowed: {allowed}"
+            )
+
+    def _validate_schema_file(self) -> None:
+        """Validate that the schema file exists and is a JSON file."""
+        if not os.path.isfile(self.schema_path):
+            raise FileNotFoundError(f"Schema file not found: {self.schema_path}")
+
+        if not self.schema_path.lower().endswith(".json"):
+            raise ValueError(f"Schema file must be a JSON file: {self.schema_path}")
         
-        Parameters
-        ----------
-        file_path : str
-            Path to the file to validate.
-        """
-        if not os.path.isfile(file_path):
-            raise FileNotFoundError(f"File not found: {file_path}")
+    def _validate_output_base(self) -> None:
+        """Validate or create the base output directory."""
+        if not os.path.exists(self.output_dir_base):
+            os.makedirs(self.output_dir_base, exist_ok=True)
+        elif not os.path.isdir(self.output_dir_base):
+            raise NotADirectoryError(f"OUTPUT_DIR is not a directory: {self.output_dir_base}")
 
-    @staticmethod
-    def _validate_directory(dir_path: str) -> None:
+    def _create_output_dir(self) -> str:
         """
-        Validate that a directory exists or create it.
-
-        Parameters
-        ----------
-        dir_path : str
-            Path to the directory to validate or create.
-        """
-        if not os.path.exists(dir_path):
-            os.makedirs(dir_path, exist_ok=True)
-        elif not os.path.isdir(dir_path):
-            raise NotADirectoryError(f"OUTPUT_DIR_base is not a directory: {dir_path}")
-        
-    @staticmethod
-    def _create_output_dir(base_output_dir: str) -> str:
-        """
-        Create a timestamped output directory.
-
-        Parameters
-        ----------
-        base_output_dir : str
-            Base directory where the output directory will be created.
+        Create a timestamped output directory within the base output directory.
 
         Returns
         -------
-        output_dir : str
-            Path to the newly created output directory.
+        str
+            Full path to the created timestamped output directory.
         """
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_dir = os.path.join(base_output_dir, timestamp)
+        output_dir = os.path.join(self.output_dir_base, timestamp)
         os.makedirs(output_dir, exist_ok=True)
         return output_dir
 
@@ -123,14 +119,14 @@ class ModelConfig:
     models : list[RegressionModels]
         Parsed list of models (enum members) to include in the evaluation.
     """
-    models_config : str
-    random_state  : int
-    models        : List["RegressionModels"] = field(init=False)
+    models_config: str
+    random_state : int
+    models       : List["RegressionModels"] = field(init=False)
 
     def __post_init__(self) -> None:
         """Parse `models_config` and populate `self.models`."""
-        self.models = self._parse_models(self.models_config)
-        self._validate_random_state(self.random_state)
+        self.models = self._parse_models()
+        self._validate_random_state()
 
         from src.core.models.definitions import AbstractModel
         AbstractModel.seed = self.random_state
@@ -149,6 +145,29 @@ class ModelConfig:
             models_config = str(config("MODELS", default="all")),
             random_state  = config("RANDOM_STATE", default=42, cast=int),
         )
+    
+    def _parse_models(self) -> List["RegressionModels"]:
+        """
+        Parse the model specification string.
+
+        Returns
+        -------
+        list[RegressionModels]
+            List of `RegressionModels` enum members.
+        """
+        models_config = self.models_config.strip()
+
+        if models_config.lower() == "all":
+            return list(RegressionModels)
+
+        names = [t.strip().upper() for t in models_config.split(",") if t.strip()]
+        enums = [ModelConfig._to_enum(n) for n in names]
+        return ModelConfig._check_duplicates(enums)
+    
+    def _validate_random_state(self) -> None:
+        """Validate that random_state is non-negative."""
+        if self.random_state < 0:
+            raise ValueError(f"RANDOM_STATE must be >= 0, got: {self.random_state}")
 
     @staticmethod
     def _to_enum(name: str) -> "RegressionModels":
@@ -159,6 +178,7 @@ class ModelConfig:
         ----------
         name : str
             Model name token to convert.
+
         Returns
         -------
         RegressionModels
@@ -197,43 +217,6 @@ class ModelConfig:
             seen.add(x)
         return items
 
-    @staticmethod
-    def _parse_models(spec: str) -> List["RegressionModels"]:
-        """
-        Parse the model specification string.
-
-        Parameters
-        ----------
-        spec : str
-            MODELS value from the .env.
-
-        Returns
-        -------
-        list[RegressionModels]
-            List of `RegressionModels` enum members.
-        """
-        spec = spec.strip()
-
-        if spec.lower() == "all":
-            return list(RegressionModels)
-
-        names = [t.strip().upper() for t in spec.split(",") if t.strip()]
-        enums = [ModelConfig._to_enum(n) for n in names]
-        return ModelConfig._check_duplicates(enums)
-    
-    @staticmethod
-    def _validate_random_state(random_state: int) -> None:
-        """
-        Validate that random_state is non-negative.
-        
-        Parameters
-        ----------
-        random_state : int
-            Random seed to validate.
-        """
-        if random_state < 0:
-            raise ValueError(f"RANDOM_STATE must be >= 0, got: {random_state}")
-
 
 @dataclass
 class ValidationConfig:
@@ -244,12 +227,20 @@ class ValidationConfig:
     ----------
     n_splits : int
         Number of cross-validation folds.
+    cv_strategy : str
+        Cross-validation strategy ('kfold' or 'groupkfold').
+    group_column : str
+        Column name used for GroupKFold.
     """
-    n_splits: int
+    n_splits    : int
+    cv_strategy : str
+    group_column: str
 
     def __post_init__(self) -> None:
-        """Validate n_splits after initialization."""
-        self._validate_n_splits(self.n_splits)
+        """Validate cross-validation settings after initialization."""
+        self._validate_n_splits()
+        self._validate_cv_strategy()
+        self._validate_group_column()
     
     @classmethod
     def from_env(cls) -> 'ValidationConfig':
@@ -262,21 +253,28 @@ class ValidationConfig:
             An instance of ValidationConfig populated from environment variables.
         """
         return cls(
-            n_splits=config('N_SPLITS', default=5, cast=int)
+            n_splits=config('N_SPLITS', default=5, cast=int),
+            cv_strategy=str(config('CV_STRATEGY', default='kfold')).lower(),
+            group_column=str(config('GROUP_COLUMN', default='')).strip()
         )
     
-    @staticmethod
-    def _validate_n_splits(n_splits: int) -> None:
-        """
-        Validate that n_splits is at least 2.
-        
-        Parameters
-        ----------
-        n_splits : int
-            Number of cross-validation folds to validate.
-        """
-        if n_splits < 2:
-            raise ValueError(f"N_SPLITS must be >= 2, got: {n_splits}") 
+    def _validate_n_splits(self) -> None:
+        """Validate that n_splits is at least 2."""
+        if self.n_splits < 2:
+            raise ValueError(f"N_SPLITS must be >= 2, got: {self.n_splits}")
+    
+    def _validate_cv_strategy(self) -> None:
+        """Validate that cv_strategy is a supported strategy."""
+        valid_strategies = {"kfold", "groupkfold"}
+        if self.cv_strategy not in valid_strategies:
+            raise ValueError(f"CV_STRATEGY must be one of {valid_strategies}, got: {self.cv_strategy}")
+    
+    def _validate_group_column(self) -> None:
+        """Validate group_column based on cv_strategy."""
+        if self.cv_strategy == "groupkfold" and self.group_column == "":
+            raise ValueError(
+                "GROUP_COLUMN must be set when CV_STRATEGY='groupkfold'"
+            )
 
 
 @dataclass
@@ -291,13 +289,13 @@ class LoggingConfig:
     debug : bool
         Enable debug mode.
     """
-    log_level : str
-    debug     : bool
+    log_level: str
+    debug    : bool
 
     def __post_init__(self) -> None:
         """Validate logging settings after initialization."""
-        self._validate_log_level(self.log_level)
-        self._validate_debug_mode(self.debug)
+        self._validate_log_level()
+        self._validate_debug_mode()
     
     @classmethod
     def from_env(cls) -> 'LoggingConfig':
@@ -314,32 +312,16 @@ class LoggingConfig:
             debug     = config('DEBUG', default=False, cast=bool)
         )
     
-    @staticmethod
-    def _validate_log_level(log_level: str) -> None:
-        """
-        Validate the logging level.
-        
-        Parameters
-        ----------
-        log_level : str
-            Logging level to validate.
-        """
-        if log_level.upper() not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
-            raise ValueError(f"Invalid LOG_LEVEL: {log_level}")
+    def _validate_log_level(self) -> None:
+        """Validate the logging level."""
+        if self.log_level.upper() not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+            raise ValueError(f"Invalid LOG_LEVEL: {self.log_level}")
 
         
-    @staticmethod
-    def _validate_debug_mode(debug: bool) -> None:
-        """
-        Validate that debug is a boolean.
-        
-        Parameters
-        ----------
-        debug : bool
-            Debug mode to validate.
-        """
-        if not isinstance(debug, bool):
-            raise ValueError(f"DEBUG must be a boolean, got: {debug}")
+    def _validate_debug_mode(self) -> None:
+        """Validate that debug is a boolean."""
+        if not isinstance(self.debug, bool):
+            raise ValueError(f"DEBUG must be a boolean, got: {self.debug}")
 
 
 @dataclass
@@ -358,10 +340,10 @@ class Settings:
     logging : LoggingConfig
         Logging-related settings.
     """
-    data       : DataConfig
-    model      : ModelConfig
-    validation : ValidationConfig
-    logging    : LoggingConfig
+    data      : DataConfig
+    model     : ModelConfig
+    validation: ValidationConfig
+    logging   : LoggingConfig
 
     @classmethod
     def from_env(cls) -> 'Settings':

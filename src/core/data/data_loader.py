@@ -1,9 +1,11 @@
 import json
-import pandas as pd
-from .schema import Schema
+from dataclasses import dataclass
 from typing import Dict, Callable, ClassVar
 
-from dataclasses import dataclass
+import pandas as pd
+
+from .schema import Schema
+
 
 @dataclass
 class DataLoader:
@@ -13,9 +15,9 @@ class DataLoader:
     Parameters
     ----------
     data_path : str
-        Path to the dataset file. Supported formats: xlsx, csv, parquet, json.
+        Path to the dataset file.
     schema_path : str
-        Path to the JSON file containing the dataset schema.
+        Path to the JSON schema file.
     """
     SUPPORTED_READERS: ClassVar[Dict[str, Callable[[str], pd.DataFrame]]] = {
         'xlsx'   : pd.read_excel,
@@ -24,17 +26,8 @@ class DataLoader:
         'json'   : pd.read_json
     }
 
-    data_path   : str
-    schema_path : str
-
-    def __post_init__(self) -> None:
-        """Validate file formats"""
-        self._extension = self.data_path.split('.')[-1].lower()
-        if self._extension not in self.SUPPORTED_READERS:
-            supported = ', '.join(self.SUPPORTED_READERS.keys())
-            raise ValueError(f"Unsupported file extension '{self._extension}'. Supported: {supported}")
-        if not self.schema_path.endswith('.json'):
-            raise ValueError(f"Schema file must be JSON: {self.schema_path}")
+    data_path  : str
+    schema_path: str
 
     def load_data(self) -> pd.DataFrame:
         """
@@ -42,10 +35,11 @@ class DataLoader:
 
         Returns
         -------
-        df : pandas.DataFrame
+        df : pd.DataFrame
             The loaded dataset.
         """
-        reader_func = self.SUPPORTED_READERS[self._extension]
+        extension = self.data_path.split('.')[-1].lower()
+        reader_func = self.SUPPORTED_READERS[extension]
 
         try:
             df = reader_func(self.data_path)
@@ -60,14 +54,14 @@ class DataLoader:
 
         return df
 
-    def load_schema(self) -> Schema:
+    def load_schema(self) -> 'Schema':
         """
         Load and parse the schema definition from the specified JSON file.
 
         Returns
         -------
         schema : Schema
-            Schema object created from the loaded dictionary containing target and feature definitions.
+            Schema object created from the JSON file.
         """
         try:
             with open(self.schema_path, 'r', encoding='utf-8') as file:
@@ -80,4 +74,29 @@ class DataLoader:
         if not schema_dict:
             raise ValueError(f"Schema file is empty: {self.schema_path}")
 
+        if not isinstance(schema_dict, dict):
+            raise ValueError(
+                f"Schema file must contain a JSON object at the top level. "
+                f"Got {type(schema_dict).__name__} instead."
+            )
+
+        required_keys = {"targets", "features"}
+        missing = required_keys - schema_dict.keys()
+        if missing:
+            raise ValueError(
+                f"Schema file is missing required fields: {', '.join(sorted(missing))}"
+            )
+
+        unknown_keys = schema_dict.keys() - required_keys
+        if unknown_keys:
+            raise ValueError(
+                f"Schema contains unknown top-level fields: {', '.join(sorted(unknown_keys))}"
+            )
+
+        if not isinstance(schema_dict["targets"], list):
+            raise ValueError("'targets' field must be a list.")
+        if not isinstance(schema_dict["features"], list):
+            raise ValueError("'features' field must be a list.")
+
         return Schema.from_dict(schema_dict)
+    

@@ -1,8 +1,20 @@
 {
-  "target": {
-    "names": ["HFI_100m", "NDVI_mean_100m"]
-  },
+  "targets": [
+    {
+      "name": "HFI_100m",
+      "type": "numerical"
+    },
+    {
+      "name": "NDVI_mean_100m",
+      "type": "numerical"
+    }
+  ],
   "features": [
+    {
+      "name": "ponto_periodo",
+      "type": "id"
+
+    },
     {
       "name": "ACI_TOTAL_D",
       "type": "numerical"

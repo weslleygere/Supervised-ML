@@ -1,45 +1,36 @@
-import re
 import logging
+
 import pandas as pd
-from src.core.data.schema import Schema, FeatureSchema, TargetSchema
+
+from src.core.data.schema import Schema
 
 logger = logging.getLogger(__name__)
+
 
 class PreSplitProcessor:
     """
     Applies pre-split preprocessing to raw input data, including:
-    - Removing rows with missing target values.
-    - Dropping ignored features.
-    - Setting column data types.
-    - Sanitizing column names to remove special characters.
-
-    This ensures that the dataset is cleaned and formatted correctly before splitting into train/test sets.
+    - Selecting only schema-defined features and targets, dropping others.
+    - Validating that all schema-defined columns exist in the dataset.
+    - Setting column data types based on schema definitions.
+    
+    This ensures that the dataset is correctly formatted before
+    splitting into train/test sets.
 
     Parameters
-    -----------
+    ----------
     schema : Schema
         Schema object containing target and feature definitions.
-
-    Attributes
-    ----------
-    target : TargetSchema
-        Schema object for the target variable.
-    features : list[FeatureSchema]
-        List of feature schema objects.
     """
 
     def __init__(self, schema: Schema) -> None:
-        self.schema   : Schema              = schema
-        self.target   : TargetSchema        = schema.target
-        self.features : list[FeatureSchema] = schema.features
+        self.schema: Schema = schema
 
     def process(self, df_raw: pd.DataFrame) -> pd.DataFrame:
         """
         Apply all preprocessing steps in order:
-        - Remove rows with missing targets.
-        - Drop ignored columns.
-        - Convert column data types.
-        - Sanitize column names.
+        1. Select schema-defined features/targets and validate missing columns.
+        2. Convert column data types based on schema.
 
         Parameters
         ----------
@@ -49,47 +40,81 @@ class PreSplitProcessor:
         Returns
         -------
         df : pd.DataFrame
-            Preprocessed dataset ready for train/test split and modeling.
+            Preprocessed dataset ready for splitting and modeling.
         """
         df = df_raw.copy()
         df = self._trim(df)
         df = self._set_dtypes(df)
-        df = self._sanitize_column_names(df)
         return df
 
     def _trim(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Remove rows with missing target values and select relevant variables.
+        Retain only columns defined in the schema (features + targets).
 
         Parameters
         ----------
         df : pd.DataFrame
-            Input DataFrame to be trimmed.
+            Input DataFrame to be validated and trimmed.
 
         Returns
         -------
         df : pd.DataFrame
-            Trimmed DataFrame with only relevant features and complete targets.
+            Trimmed DataFrame with schema-defined features + targets.
         """
-        df = df.dropna(subset=self.target.names)
-        
-        cols_def = [f.name for f in self.features] + self.target.names        
+        self._validate_schema_columns(df)
+
+        if self.schema.ignored_feature_names:
+            logger.warning(
+                f"The following columns were marked as 'ignore' in the schema and "
+                f"will be ignored: {self.schema.ignored_feature_names}"
+            )
+
+        cols_def = self.schema.feature_names + self.schema.target_names 
         cols_not_def = df.columns.difference(cols_def)
         
         if len(cols_not_def) > 0:
-            logger.warning(f"The following columns were not defined in the schema and will be ignored: {list(cols_not_def)}")
-
-        cols_to_keep = [f.name for f in self.features if f.type != 'ignore'] + self.target.names
-
+            logger.warning(
+                f"The following columns were not defined in the schema and "
+                f"will be ignored: {list(cols_not_def)}"
+            )
+        
+        cols_to_keep = self.schema.valid_feature_names_id + self.schema.target_names
+        
         return df[cols_to_keep]
+
+    def _validate_schema_columns(self, df: pd.DataFrame) -> None:
+        """
+        Validate that all schema-defined columns exist in the dataset.
+        
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Input DataFrame to validate.
+            
+        Raises
+        ------
+        ValueError
+            If any schema-defined target or feature columns are missing.
+        """
+        missing_targets = [t for t in self.schema.target_names if t not in df.columns]
+        if missing_targets:
+            raise ValueError(
+                f"The following target columns were defined in the schema but "
+                f"are missing in the dataset: {missing_targets}"
+            )
+
+        missing_features = [f for f in self.schema.feature_names if f not in df.columns]
+        if missing_features:
+            raise ValueError(
+                f"The following feature columns were defined in the schema but "
+                f"are missing in the dataset: {missing_features}"
+            )
 
     def _set_dtypes(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Set column data types based on schema:
-        - Numerical columns are cast to float.
-        - Ignored columns are skipped (but already dropped in `_trim`).
-
-        Target columns are also cast to float.
+        Convert data types for features and targets based on schema:
+        - Numerical features → float
+        - Numerical targets → float
 
         Parameters
         ----------
@@ -98,39 +123,34 @@ class PreSplitProcessor:
 
         Returns
         -------
-        df : pd.DataFrame
-            DataFrame with updated column data types.
+        pd.DataFrame
+            DataFrame with updated column datatypes.
         """
-        for feature in self.features:
+        for feature in self.schema.features:
             col = feature.name
 
-            match feature.type:
-                case "numerical":
-                    df[col] = pd.to_numeric(df[col])
-                case "ignore":
-                    pass
-        for col in self.target.names:
-            df[col] = pd.to_numeric(df[col])
+            if feature.type == "ignore":
+                continue
 
-        return df
+            if feature.type == "numerical":
+                try:
+                    df[col] = pd.to_numeric(df[col], errors="raise")
+                except Exception as e:
+                    raise ValueError(
+                        f"Feature column '{col}' contains non-numeric values or "
+                        f"cannot be converted to float."
+                    ) from e
 
-    def _sanitize_column_names(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Remove special characters from column names to avoid incompatibility
-        with some ML frameworks (e.g., LightGBM JSON parsing errors).
+        for target in self.schema.target:
+            col = target.name
 
-        Parameters
-        ----------
-        df : pd.DataFrame
-            Input DataFrame with potentially unsafe column names.
+            if target.type == "numerical":
+                try:
+                    df[col] = pd.to_numeric(df[col], errors="raise")
+                except Exception as e:
+                    raise ValueError(
+                        f"Target column '{col}' contains non-numeric values or "
+                        f"cannot be converted to float."
+                    ) from e
 
-        Returns
-        -------
-        df : pd.DataFrame
-            DataFrame with sanitized column names.
-        """
-        sanitized_columns = [
-            re.sub(r'[\"\'{}]', '', col) for col in df.columns
-        ]
-        df.columns = sanitized_columns
         return df

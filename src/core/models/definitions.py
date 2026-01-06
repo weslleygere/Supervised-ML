@@ -1,8 +1,13 @@
+import re
 import time
+from typing import Optional
+
 import torch
 import pandas as pd
-from typing import Optional
 from sklearn.svm import SVR
+from xgboost import XGBRegressor
+from lightgbm import LGBMRegressor
+from catboost import CatBoostRegressor
 from sklearn.tree import DecisionTreeRegressor
 from sklearn.neural_network import MLPRegressor
 from sklearn.neighbors import KNeighborsRegressor
@@ -10,9 +15,6 @@ from sklearn.multioutput import MultiOutputRegressor
 from sklearn.cross_decomposition import PLSRegression
 from sklearn.linear_model import LinearRegression, Ridge, Lasso, ElasticNet
 from sklearn.ensemble import ExtraTreesRegressor, RandomForestRegressor, AdaBoostRegressor
-from xgboost import XGBRegressor
-from lightgbm import LGBMRegressor
-from catboost import CatBoostRegressor
 
 class AbstractModel:
     """
@@ -96,6 +98,26 @@ class AbstractModel:
                 The predicted values.
         """
         raise NotImplementedError("Subclasses must implement the _predict method.")
+    
+    @staticmethod
+    def _sanitize_feature_names(x: pd.DataFrame) -> pd.DataFrame:
+        """
+        Sanitize feature names by removing characters that cause issues in XGBoost/LightGBM/etc.
+        Removes: [, ], <, >, {, }, (, )
+        
+        Parameters
+        ----------
+        x : pd.DataFrame
+            Input DataFrame with potentially problematic feature names.
+            
+        Returns
+        -------
+        pd.DataFrame
+            DataFrame with sanitized column names.
+        """
+        x_clean = x.copy()
+        x_clean.columns = [re.sub(r'[\[\]<>{}()]', '', col) for col in x_clean.columns]
+        return x_clean
 
     @property
     def name(self):
@@ -180,10 +202,12 @@ class KNeighborsModel(AbstractModel):
         self.model = MultiOutputRegressor(KNeighborsRegressor())
 
     def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
-        self.model.fit(x, y)
+        x_clean = self._sanitize_feature_names(x)
+        self.model.fit(x_clean, y)
 
     def _predict(self, x: pd.DataFrame) -> pd.DataFrame:
-        return pd.DataFrame(self.model.predict(x)) # type: ignore
+        x_clean = self._sanitize_feature_names(x)
+        return pd.DataFrame(self.model.predict(x_clean)) # type: ignore
     
 # ======================================================
 #                Ensemble Models
@@ -196,10 +220,12 @@ class DecisionTreeModel(AbstractModel):
         self.model = MultiOutputRegressor(DecisionTreeRegressor(random_state=AbstractModel.seed))
 
     def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
-        self.model.fit(x, y)
+        x_clean = self._sanitize_feature_names(x)
+        self.model.fit(x_clean, y)
 
     def _predict(self, x: pd.DataFrame) -> pd.DataFrame:
-        return pd.DataFrame(self.model.predict(x)) # type: ignore
+        x_clean = self._sanitize_feature_names(x)
+        return pd.DataFrame(self.model.predict(x_clean)) # type: ignore
     
 
 class RandomForestModel(AbstractModel):
@@ -209,10 +235,12 @@ class RandomForestModel(AbstractModel):
         self.model = RandomForestRegressor(random_state=AbstractModel.seed)
 
     def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
-        self.model.fit(x, y)
+        x_clean = self._sanitize_feature_names(x)
+        self.model.fit(x_clean, y)
 
     def _predict(self, x: pd.DataFrame) -> pd.DataFrame:
-        return pd.DataFrame(self.model.predict(x))
+        x_clean = self._sanitize_feature_names(x)
+        return pd.DataFrame(self.model.predict(x_clean))
     
 
 class ExtraTreesModel(AbstractModel):
@@ -222,11 +250,12 @@ class ExtraTreesModel(AbstractModel):
         self.model = MultiOutputRegressor(ExtraTreesRegressor(random_state=AbstractModel.seed))
 
     def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
-        self.model.fit(x, y)
+        x_clean = self._sanitize_feature_names(x)
+        self.model.fit(x_clean, y)
 
     def _predict(self, x: pd.DataFrame) -> pd.DataFrame:
-        return pd.DataFrame(self.model.predict(x)) # type: ignore
-
+        x_clean = self._sanitize_feature_names(x)
+        return pd.DataFrame(self.model.predict(x_clean)) # type: ignore
 
 class AdaBoostModel(AbstractModel):
     """AdaBoost Regressor."""
@@ -235,11 +264,12 @@ class AdaBoostModel(AbstractModel):
         self.model = MultiOutputRegressor(AdaBoostRegressor(random_state=AbstractModel.seed))
 
     def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
-        self.model.fit(x, y)
+        x_clean = self._sanitize_feature_names(x)
+        self.model.fit(x_clean, y)
 
     def _predict(self, x: pd.DataFrame) -> pd.DataFrame:
-        return pd.DataFrame(self.model.predict(x)) # type: ignore
-
+        x_clean = self._sanitize_feature_names(x)
+        return pd.DataFrame(self.model.predict(x_clean)) # type: ignore
 
 class XGBoostModel(AbstractModel):
     """XGBoost Regressor model."""
@@ -248,12 +278,13 @@ class XGBoostModel(AbstractModel):
         self.model = XGBRegressor(random_state=AbstractModel.seed)
 
     def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
-        self.model.fit(x, y)
+        x_clean = self._sanitize_feature_names(x)
+        self.model.fit(x_clean, y)
 
     def _predict(self, x: pd.DataFrame) -> pd.DataFrame:
-        return pd.DataFrame(self.model.predict(x))
+        x_clean = self._sanitize_feature_names(x)
+        return pd.DataFrame(self.model.predict(x_clean))
     
-
 class LightGBMModel(AbstractModel):
     """LightGBM Regressor."""
     def __init__(self) -> None:
@@ -261,10 +292,12 @@ class LightGBMModel(AbstractModel):
         self.model = MultiOutputRegressor(LGBMRegressor(random_state=AbstractModel.seed, verbosity=-1)) # type: ignore
 
     def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
-        self.model.fit(x, y)
+        x_clean = self._sanitize_feature_names(x)
+        self.model.fit(x_clean, y)
 
     def _predict(self, x: pd.DataFrame) -> pd.DataFrame:
-        return pd.DataFrame(self.model.predict(x)) # type: ignore
+        x_clean = self._sanitize_feature_names(x)
+        return pd.DataFrame(self.model.predict(x_clean)) # type: ignore
 
 
 class CatBoostModel(AbstractModel):
@@ -274,10 +307,12 @@ class CatBoostModel(AbstractModel):
         self.model = MultiOutputRegressor(CatBoostRegressor(verbose=0, random_state=AbstractModel.seed)) # type: ignore
 
     def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
-        self.model.fit(x, y)
+        x_clean = self._sanitize_feature_names(x)
+        self.model.fit(x_clean, y)
 
     def _predict(self, x: pd.DataFrame) -> pd.DataFrame:
-        return pd.DataFrame(self.model.predict(x)) # type: ignore
+        x_clean = self._sanitize_feature_names(x)
+        return pd.DataFrame(self.model.predict(x_clean)) # type: ignore
 
 # ======================================================
 #                Support Vector Models

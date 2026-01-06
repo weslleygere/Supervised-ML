@@ -1,4 +1,5 @@
 import logging
+
 from .core.data.data_loader import DataLoader
 from .core.evaluation.evaluator import ModelEvaluator
 from .core.processors.presplit import PreSplitProcessor
@@ -37,11 +38,13 @@ class Pipeline:
         )
         df_raw = loader.load_data()
         schema = loader.load_schema()
+
         logger.info(f"Data loaded successfully with shape {df_raw.shape}")
 
         # Step 2: Preprocess the data
         pre_split_processor = PreSplitProcessor(schema)
         df_processed = pre_split_processor.process(df_raw)
+
         logger.info(f"Data preprocessed successfully with shape {df_processed.shape}")
 
         # Step 3: Evaluate models
@@ -50,7 +53,9 @@ class Pipeline:
             output_dir=self.settings.data.output_dir,
             models = self.settings.model.models,
             random_state= self.settings.model.random_state,
-            n_splits= self.settings.validation.n_splits
+            n_splits= self.settings.validation.n_splits,
+            cv_strategy= self.settings.validation.cv_strategy,
+            group_column= self.settings.validation.group_column
         )
 
         evaluator.evaluate(df_processed)

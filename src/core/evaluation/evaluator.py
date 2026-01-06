@@ -1,18 +1,19 @@
 import os
 import logging
+from typing import List, Dict, Optional
+from dataclasses import dataclass, field
+
 import numpy as np
 import pandas as pd
-from typing import List, Dict
 from collections.abc import Iterator
-from sklearn.model_selection import KFold
-from src.core.processors.postsplit import PostSplitProcessor
-from src.core.models.factory import ModelFactory, RegressionModels
-from src.core.data.schema import Schema, FeatureSchema, TargetSchema
+from sklearn.model_selection import KFold, GroupKFold
+from sklearn.metrics import r2_score, mean_absolute_error, root_mean_squared_error
 
-from dataclasses import dataclass
 from .decorator import progress_bar
 from .plots import plot_scores, plot_times
-from sklearn.metrics import r2_score, mean_absolute_error, root_mean_squared_error
+from src.core.data.schema import Schema
+from src.core.processors.postsplit import PostSplitProcessor
+from src.core.models.factory import ModelFactory, RegressionModels
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +22,7 @@ class StatsMetrics:
     """
     Container for statistical metrics of a single target variable.
     
-    Attributes
+    Parameters
     ----------
     r2 : float
         R² (coefficient of determination) score.
@@ -30,9 +31,9 @@ class StatsMetrics:
     mae : float
         Mean Absolute Error.
     """
-    r2: float
+    r2  : float
     rmse: float
-    mae: float
+    mae : float
     
     def to_dict(self) -> Dict[str, float]:
         """
@@ -53,9 +54,9 @@ class StatsMetrics:
 @dataclass
 class FoldMetrics:
     """
-    Container for metrics from a single cross-validation fold.
+    Evaluation metrics for a single cross-validation fold.
     
-    Attributes
+    Parameters
     ----------
     stats_by_target : Dict[str, StatsMetrics]
         Statistical metrics for each target. Format: {target_name: StatsMetrics}
@@ -65,17 +66,19 @@ class FoldMetrics:
         Time taken to generate predictions on this fold.
     """
     stats_by_target: Dict[str, StatsMetrics]
-    fit_time: float
-    pred_time: float
+    fit_time       : float
+    pred_time      : float
     
     @classmethod
-    def create(cls, 
-               target_names: List[str],
-               r2_scores: List[float],
-               rmse_scores: List[float], 
-               mae_scores: List[float],
-               fit_time: float,
-               pred_time: float) -> 'FoldMetrics':
+    def create(
+        cls, 
+        target_names: List[str],
+        r2_scores: List[float],
+        rmse_scores: List[float], 
+        mae_scores: List[float],
+        fit_time: float,
+        pred_time: float
+    ) -> 'FoldMetrics':
         """
         Create a FoldMetrics instance from individual metric arrays.
         
@@ -113,31 +116,27 @@ class FoldMetrics:
 @dataclass
 class ModelMetrics:
     """
-    Container for all cross-validation results of a single model.
-    
+    Container for cross-validation results of a single model.
+
     Parameters
     ----------
     model : RegressionModels
-        The model that was evaluated.
-        
-    Attributes
-    ----------
+        Model evaluated.
     fold_metrics : List[FoldMetrics]
-        List of FoldMetrics objects, one for each fold.
+        Metrics produced for each fold.
     """
-    model: RegressionModels
-    
-    def __post_init__(self):
-        """Initialize internal storage after object creation."""
-        self.fold_metrics: List[FoldMetrics] = []
-    
-    def add_fold_result(self, 
-                       target_names: List[str],
-                       r2_scores: List[float],
-                       rmse_scores: List[float], 
-                       mae_scores: List[float],
-                       fit_time: float,
-                       pred_time: float) -> None:
+    model       : "RegressionModels"
+    fold_metrics: List[FoldMetrics] = field(default_factory=list)
+        
+    def add_fold_result(
+        self, 
+        target_names: List[str],
+        r2_scores: List[float],
+        rmse_scores: List[float], 
+        mae_scores: List[float],
+        fit_time: float,
+        pred_time: float
+    ) -> None:
         """
         Add results from a single fold.
         
@@ -177,10 +176,7 @@ class ModelResults:
     model_metrics : List[ModelMetrics]
         List of ModelMetrics objects, one per evaluated model.
     """
-    
-    def __post_init__(self):
-        """Initialize internal storage after object creation."""
-        self.model_metrics: List[ModelMetrics] = []
+    model_metrics: List[ModelMetrics] = field(default_factory=list)
     
     def add_model_result(self, model_metrics: ModelMetrics) -> None:
         """
@@ -252,29 +248,29 @@ class ModelEvaluator:
         Random seed for reproducibility.
     n_splits : int
         Number of cross-validation folds.
-
-    Attributes
-    ----------
-    target : TargetSchema
-        Target schema definition.
-    features : list[FeatureSchema]
-        Feature schema definitions.
+    cv_strategy : str
+        Cross-validation strategy: 'kfold' or 'groupkfold'.
+    group_column : str
+        Column name for grouping (required when cv_strategy is 'groupkfold').
     """
 
-    def __init__(self, 
-                 schema: Schema, 
-                 output_dir: str, 
-                 models: List[RegressionModels], 
-                 random_state: int, 
-                 n_splits: int) -> None:
-        self.schema     : Schema                 = schema
-        self.output_dir : str                    = output_dir
-        self.models     : List[RegressionModels] = models
-        self.random_state: int                   = random_state
-        self.n_splits   : int                    = n_splits
-
-        self.target     : TargetSchema           = schema.target
-        self.features   : List[FeatureSchema]    = schema.features
+    def __init__(
+        self, 
+        schema: Schema, 
+        output_dir: str, 
+        models: List[RegressionModels], 
+        random_state: int, 
+        n_splits: int,
+        cv_strategy: str,
+        group_column: str
+    ) -> None:
+        self.schema       = schema
+        self.output_dir   = output_dir
+        self.models       = models
+        self.random_state = random_state
+        self.n_splits     = n_splits
+        self.cv_strategy  = cv_strategy
+        self.group_column = group_column
 
     def evaluate(self, df_processed: pd.DataFrame) -> None:
         """
@@ -285,19 +281,25 @@ class ModelEvaluator:
         df_processed : pd.DataFrame
             Preprocessed dataset including features and targets.
         """
-        X = df_processed.drop(columns=self.target.names)
-        y = df_processed[self.target.names]
+        X, y, groups = self._extract_X_y_groups(df_processed)
 
         logger.info(f"Feature variables considered: {list(X.columns)}")
         logger.info(f"Target variables considered: {list(y.columns)}")
 
-        kf = KFold(n_splits=self.n_splits, shuffle=True, random_state=self.random_state)
-
         evaluation_results = ModelResults()
 
-        for i, reg_enum in enumerate(self.models, start=1):
-            logger.info("Evaluating model %s of %s", i, len(self.models))
-            model_metrics = self._evaluate_model(reg_enum, X, y, kf.split(X, y))
+        for idx, model_enum in enumerate(self.models, start=1):
+            logger.info(f"Evaluating model {idx}/{len(self.models)}: {model_enum.name}")
+
+            fold_iterator = self._get_split_iterator(X, y, groups)
+
+            model_metrics = self._evaluate_model(
+                regressor=model_enum,
+                features=X,
+                target=y,
+                fold_iterator=fold_iterator
+            )
+
             evaluation_results.add_model_result(model_metrics)
 
         df_summary = evaluation_results.get_summary()
@@ -307,6 +309,79 @@ class ModelEvaluator:
         plot_times(df_summary, os.path.join(self.output_dir, "eval_times"))
 
         return None
+    
+    def _extract_X_y_groups(self, df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, Optional[np.ndarray]]:
+        """
+        Extract features, targets, and groups from the dataset.
+
+        Parameters
+        ----------
+        df : pd.DataFrame
+            Preprocessed dataset.
+
+        Returns
+        -------
+        tuple[pd.DataFrame, pd.DataFrame, Optional[np.ndarray]]
+            Features DataFrame (all valid features), targets DataFrame, and groups array (if applicable).
+        """
+        cols_to_drop = list(self.schema.target_names)
+        groups = None
+
+        if self.cv_strategy == "groupkfold":
+            if self.group_column not in df.columns:
+                raise ValueError(
+                    f"Column '{self.group_column}' not found in dataset."
+                )
+            logger.info(f"Using GroupKFold with group column '{self.group_column}'.")
+
+            groups = df[self.group_column].to_numpy()
+            cols_to_drop.append(self.group_column)
+        else:
+            logger.info("Using standard KFold cross-validation.")
+
+        X = df.drop(columns=cols_to_drop)
+        y = df[self.schema.target_names]
+
+        return X, y, groups
+    
+    def _get_split_iterator(
+        self,
+        X: pd.DataFrame,
+        y: pd.DataFrame,
+        groups: Optional[np.ndarray]
+    ) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+        """
+        Generate a CV split iterator using KFold or GroupKFold.
+
+        Parameters
+        ----------
+        X : pd.DataFrame
+            Feature matrix.
+        y : pd.DataFrame
+            Target matrix aligned with X.
+        groups : Optional[np.ndarray]
+            Group memberships for GroupKFold;
+            should be None when using standard KFold.
+
+        Returns
+        -------
+        Iterator[tuple[np.ndarray, np.ndarray]]
+            Iterator yielding (train_index, test_index) tuples.
+        """
+        if self.cv_strategy == "groupkfold":
+            cv_splitter = GroupKFold(
+                n_splits=self.n_splits,
+                shuffle=True,                   # type: ignore
+                random_state=self.random_state  # type: ignore
+            )
+            return cv_splitter.split(X=X, y=y, groups=groups)
+
+        cv_splitter = KFold(
+            n_splits=self.n_splits,
+            shuffle=True,
+            random_state=self.random_state
+        )
+        return cv_splitter.split(X=X, y=y)
 
     @progress_bar
     def _evaluate_model(
@@ -338,10 +413,8 @@ class ModelEvaluator:
         model_metrics = ModelMetrics(regressor)
 
         for train_idx, test_idx in fold_iterator:
-            X_train = features.iloc[train_idx].copy()
-            X_test = features.iloc[test_idx].copy()
-            y_train = target.iloc[train_idx].copy()
-            y_test = target.iloc[test_idx]
+            X_train, X_test = features.iloc[train_idx], features.iloc[test_idx]
+            y_train, y_test = target.iloc[train_idx], target.iloc[test_idx]
 
             post_split_processor = PostSplitProcessor(self.schema)
             X_train, y_train = post_split_processor.fit_transform(X_train, y_train)
@@ -349,6 +422,7 @@ class ModelEvaluator:
 
             model_instance = ModelFactory.create_model(regressor)
             fit_time = model_instance.fit(X_train, y_train)
+            
             y_pred, prediction_time = model_instance.predict(X_test)
             y_pred = post_split_processor.inverse_transform_target(y_pred)
 
@@ -357,7 +431,7 @@ class ModelEvaluator:
             mae_scores = mean_absolute_error(y_test, y_pred, multioutput='raw_values')
 
             model_metrics.add_fold_result(
-                target_names=self.target.names,
+                target_names=self.schema.target_names,
                 r2_scores=r2_scores.tolist(),
                 rmse_scores=rmse_scores.tolist(),
                 mae_scores=mae_scores.tolist(),

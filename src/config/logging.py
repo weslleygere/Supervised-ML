@@ -1,11 +1,13 @@
 import os
-import torch
 import shutil
 import logging
 import platform
 from logging import Filter
 from datetime import datetime
-from src.config.settings import Settings
+
+import torch
+
+from .settings import Settings
 
 logger = logging.getLogger(__name__)
 
