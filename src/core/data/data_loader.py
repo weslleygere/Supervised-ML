@@ -1,6 +1,6 @@
 import json
 from dataclasses import dataclass
-from typing import Dict, Callable, ClassVar
+from typing import Callable, ClassVar
 
 import pandas as pd
 
@@ -10,93 +10,109 @@ from .schema import Schema
 @dataclass
 class DataLoader:
     """
-    Utility class for loading datasets and their corresponding schema definitions.
+    Load the dataset and its schema definition.
 
     Parameters
     ----------
     data_path : str
         Path to the dataset file.
+
     schema_path : str
         Path to the JSON schema file.
     """
-    SUPPORTED_READERS: ClassVar[Dict[str, Callable[[str], pd.DataFrame]]] = {
-        'xlsx'   : pd.read_excel,
-        'csv'    : pd.read_csv,
-        'parquet': pd.read_parquet,
-        'json'   : pd.read_json
+
+    SUPPORTED_READERS: ClassVar[
+        dict[str, Callable[[str], pd.DataFrame]]
+    ] = {
+        "xlsx": pd.read_excel,
+        "csv": pd.read_csv,
+        "parquet": pd.read_parquet,
+        "json": pd.read_json,
     }
 
-    data_path  : str
+    data_path: str
     schema_path: str
 
     def load_data(self) -> pd.DataFrame:
         """
-        Load dataset from the specified path based on file extension.
+        Load the dataset based on its file extension.
 
         Returns
         -------
-        df : pd.DataFrame
-            The loaded dataset.
+        pd.DataFrame
+            Loaded dataset.
         """
-        extension = self.data_path.split('.')[-1].lower()
-        reader_func = self.SUPPORTED_READERS[extension]
+        extension = self.data_path.rsplit(".", 1)[-1].lower()
+        reader = self.SUPPORTED_READERS[extension]
 
         try:
-            df = reader_func(self.data_path)
-        except Exception as e:
-            raise ValueError(f"Failed to load file '{self.data_path}'") from e
+            df = reader(self.data_path)
+        except Exception as exc:
+            raise ValueError(
+                f"Failed to load file '{self.data_path}'."
+            ) from exc
 
         if not isinstance(df, pd.DataFrame):
-            raise ValueError(f"Expected DataFrame, got {type(df).__name__}")
+            raise ValueError(
+                f"Expected DataFrame, got {type(df).__name__}."
+            )
 
         if df.empty:
-            raise ValueError(f"Loaded data is empty: {self.data_path}")
+            raise ValueError(
+                f"Loaded data is empty: {self.data_path}"
+            )
 
         return df
 
-    def load_schema(self) -> 'Schema':
+    def load_schema(self) -> Schema:
         """
-        Load and parse the schema definition from the specified JSON file.
+        Load the instance-MIR schema from JSON.
 
         Returns
         -------
-        schema : Schema
-            Schema object created from the JSON file.
+        Schema
+            Parsed dataset schema.
         """
         try:
-            with open(self.schema_path, 'r', encoding='utf-8') as file:
+            with open(
+                self.schema_path,
+                "r",
+                encoding="utf-8",
+            ) as file:
                 schema_dict = json.load(file)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid JSON in schema file '{self.schema_path}'") from e
-        except Exception as e:
-            raise ValueError(f"Failed to load schema file '{self.schema_path}'") from e
 
-        if not schema_dict:
-            raise ValueError(f"Schema file is empty: {self.schema_path}")
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"Invalid JSON in schema file "
+                f"'{self.schema_path}'."
+            ) from exc
+
+        except Exception as exc:
+            raise ValueError(
+                f"Failed to load schema file "
+                f"'{self.schema_path}'."
+            ) from exc
 
         if not isinstance(schema_dict, dict):
             raise ValueError(
-                f"Schema file must contain a JSON object at the top level. "
-                f"Got {type(schema_dict).__name__} instead."
+                "Schema file must contain a JSON object."
             )
 
-        required_keys = {"targets", "features"}
+        required_keys = {
+            "target",
+            "group",
+            "bag",
+            "instance_columns",
+            "index_prefixes",
+            "embedding",
+        }
+
         missing = required_keys - schema_dict.keys()
+
         if missing:
             raise ValueError(
-                f"Schema file is missing required fields: {', '.join(sorted(missing))}"
+                "Schema file is missing required fields: "
+                f"{', '.join(sorted(missing))}"
             )
-
-        unknown_keys = schema_dict.keys() - required_keys
-        if unknown_keys:
-            raise ValueError(
-                f"Schema contains unknown top-level fields: {', '.join(sorted(unknown_keys))}"
-            )
-
-        if not isinstance(schema_dict["targets"], list):
-            raise ValueError("'targets' field must be a list.")
-        if not isinstance(schema_dict["features"], list):
-            raise ValueError("'features' field must be a list.")
 
         return Schema.from_dict(schema_dict)
-    

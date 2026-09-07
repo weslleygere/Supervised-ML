@@ -1,59 +1,14 @@
 {
-  "targets": [
-    {
-      "name": "HFI_100m",
-      "type": "numerical"
-    },
-    {
-      "name": "NDVI_mean_100m",
-      "type": "numerical"
-    }
+  "target": "meanHFI",
+  "group": "Point",
+  "bag": "CapturePointId",
+  "instance_columns": [
+    "Audio_Name",
+    "Segment_Name"
   ],
-  "features": [
-    {
-      "name": "ponto_periodo",
-      "type": "id"
-
-    },
-    {
-      "name": "ACI_TOTAL_D",
-      "type": "numerical"
-    },
-    {
-      "name": "ACI_BYMIN_D",
-      "type": "numerical"
-    },
-    {
-      "name": "ACI_j60_total_D",
-      "type": "numerical"
-    },
-    {
-      "name": "ACI_j60_bymin_D",
-      "type": "numerical"
-    },
-    {
-      "name": "NDSI_D",
-      "type": "numerical"
-    },
-    {
-      "name": "BIO_D",
-      "type": "numerical"
-    },
-    {
-      "name": "ADI_D",
-      "type": "numerical"
-    },
-    {
-      "name": "AEI_D",
-      "type": "numerical"
-    },
-    {
-      "name": "TOTAL_ENT_D",
-      "type": "numerical"
-    },
-    {
-      "name": "TEMP_ENT_D",
-      "type": "numerical"
-    }
-  ]
+  "index_prefixes": [
+    "s_",
+    "t_"
+  ],
+  "embedding": "embedding"
 }

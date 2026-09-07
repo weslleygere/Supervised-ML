@@ -1,442 +1,1063 @@
-import os
+import json
 import logging
-from typing import List, Dict, Optional
-from dataclasses import dataclass, field
+import os
+from dataclasses import dataclass
 
 import numpy as np
+import optuna
 import pandas as pd
-from collections.abc import Iterator
-from sklearn.model_selection import KFold, GroupKFold
-from sklearn.metrics import r2_score, mean_absolute_error, root_mean_squared_error
 
-from .decorator import progress_bar
-from .plots import plot_scores, plot_times
+from sklearn.metrics import (
+    mean_absolute_error,
+    r2_score,
+    root_mean_squared_error,
+)
+from sklearn.model_selection import GroupKFold
+
 from src.core.data.schema import Schema
+from src.core.models.factory import (
+    ModelFactory,
+    RegressionModels,
+)
+from src.core.evaluation.plots import save_evaluation_plots
+from src.core.models.search_space import suggest_parameters
 from src.core.processors.postsplit import PostSplitProcessor
-from src.core.models.factory import ModelFactory, RegressionModels
+
 
 logger = logging.getLogger(__name__)
 
-@dataclass
-class StatsMetrics:
+
+@dataclass(frozen=True)
+class MIRMetrics:
     """
-    Container for statistical metrics of a single target variable.
-    
-    Parameters
-    ----------
-    r2 : float
-        R² (coefficient of determination) score.
-    rmse : float
-        Root Mean Squared Error.
-    mae : float
-        Mean Absolute Error.
+    Metrics obtained after instance-level predictions are aggregated
+    within CapturePointId.
+
+    Each physical Point receives the same total evaluation weight.
     """
-    r2  : float
+
+    mae: float
     rmse: float
-    mae : float
-    
-    def to_dict(self) -> Dict[str, float]:
-        """
-        Convert metrics to dictionary format.
-        
-        Returns
-        -------
-        Dict[str, float]
-            Dictionary with metric names as keys and values as floats.
-        """
-        return {
-            'R2': self.r2,
-            'RMSE': self.rmse,
-            'MAE': self.mae
-        }
-
-
-@dataclass
-class FoldMetrics:
-    """
-    Evaluation metrics for a single cross-validation fold.
-    
-    Parameters
-    ----------
-    stats_by_target : Dict[str, StatsMetrics]
-        Statistical metrics for each target. Format: {target_name: StatsMetrics}
-    fit_time : float
-        Time taken to fit the model on this fold.
-    pred_time : float
-        Time taken to generate predictions on this fold.
-    """
-    stats_by_target: Dict[str, StatsMetrics]
-    fit_time       : float
-    pred_time      : float
-    
-    @classmethod
-    def create(
-        cls, 
-        target_names: List[str],
-        r2_scores: List[float],
-        rmse_scores: List[float], 
-        mae_scores: List[float],
-        fit_time: float,
-        pred_time: float
-    ) -> 'FoldMetrics':
-        """
-        Create a FoldMetrics instance from individual metric arrays.
-        
-        Parameters
-        ----------
-        target_names : List[str]
-            Names of the target variables.
-        r2_scores : List[float]
-            R² scores for each target.
-        rmse_scores : List[float]
-            RMSE scores for each target.
-        mae_scores : List[float]
-            MAE scores for each target.
-        fit_time : float
-            Time taken to fit the model on this fold.
-        pred_time : float
-            Time taken to generate predictions on this fold.
-            
-        Returns
-        -------
-        FoldMetrics
-            New FoldMetrics instance.
-        """
-        stats_by_target = {}
-        for target_name, r2, rmse, mae in zip(target_names, r2_scores, rmse_scores, mae_scores):
-            stats_by_target[target_name] = StatsMetrics(r2=r2, rmse=rmse, mae=mae)
-        
-        return cls(
-            stats_by_target=stats_by_target,
-            fit_time=fit_time,
-            pred_time=pred_time
-        )
-
-
-@dataclass
-class ModelMetrics:
-    """
-    Container for cross-validation results of a single model.
-
-    Parameters
-    ----------
-    model : RegressionModels
-        Model evaluated.
-    fold_metrics : List[FoldMetrics]
-        Metrics produced for each fold.
-    """
-    model       : "RegressionModels"
-    fold_metrics: List[FoldMetrics] = field(default_factory=list)
-        
-    def add_fold_result(
-        self, 
-        target_names: List[str],
-        r2_scores: List[float],
-        rmse_scores: List[float], 
-        mae_scores: List[float],
-        fit_time: float,
-        pred_time: float
-    ) -> None:
-        """
-        Add results from a single fold.
-        
-        Parameters
-        ----------
-        target_names : List[str]
-            Names of the target variables.
-        r2_scores : List[float]
-            R² scores for each target.
-        rmse_scores : List[float]
-            RMSE scores for each target.
-        mae_scores : List[float]
-            MAE scores for each target.
-        fit_time : float
-            Time taken to fit the model on this fold.
-        pred_time : float
-            Time taken to generate predictions on this fold.
-        """
-        fold_metrics = FoldMetrics.create(
-            target_names=target_names,
-            r2_scores=r2_scores,
-            rmse_scores=rmse_scores,
-            mae_scores=mae_scores,
-            fit_time=fit_time,
-            pred_time=pred_time
-        )
-        self.fold_metrics.append(fold_metrics)
-
-
-@dataclass
-class ModelResults:
-    """
-    Container for all evaluation results across multiple models.
-
-    Attributes
-    ----------
-    model_metrics : List[ModelMetrics]
-        List of ModelMetrics objects, one per evaluated model.
-    """
-    model_metrics: List[ModelMetrics] = field(default_factory=list)
-    
-    def add_model_result(self, model_metrics: ModelMetrics) -> None:
-        """
-        Add evaluation results for a model.
-        
-        Parameters
-        ----------
-        model_metrics : ModelMetrics
-            The ModelMetrics object to add.
-        """
-        self.model_metrics.append(model_metrics)
-    
-    def get_summary(self) -> pd.DataFrame:
-        """
-        Get statistical summary of all model results.
-        
-        Returns
-        -------
-        pd.DataFrame
-            Summary DataFrame with mean and std of metrics for each model.
-        """
-        long_df = self._to_long_format().drop(columns=["fold"])
-        summary_df = long_df.groupby("model").agg(["mean", "std"]).round(4)
-        return summary_df
-    
-    def _to_long_format(self) -> pd.DataFrame:
-        """
-        Convert model metrics to long-format DataFrame.
-        
-        Returns
-        -------
-        pd.DataFrame
-            Long-format DataFrame containing model metrics.
-        """
-        rows = []
-        for model_metrics in self.model_metrics:
-            n_folds = len(model_metrics.fold_metrics)
-            for fold_idx in range(n_folds):
-                fold_metrics = model_metrics.fold_metrics[fold_idx]
-                row = {
-                    "model": model_metrics.model.name,
-                    "fold": fold_idx + 1,
-                    "fit_time": fold_metrics.fit_time,
-                    "pred_time": fold_metrics.pred_time
-                }
-                
-                for target_name, stats_metrics in fold_metrics.stats_by_target.items():
-                    for metric_type, value in stats_metrics.to_dict().items():
-                        row[f"{metric_type}_{target_name}"] = value
-                
-                rows.append(row)
-        
-        return pd.DataFrame(rows)
+    r2: float
 
 
 class ModelEvaluator:
     """
-    Perform k-fold cross-validation for multiple models and summarize results.
+    Nested grouped cross-validation for the instance-MIR experiment.
 
-    Parameters
-    ----------
-    schema : Schema
-        Schema object containing target and feature definitions.
-    output_dir : str
-        Directory to store evaluation outputs.
-    models : list[RegressionModels]
-        List of models to evaluate.
-    random_state : int
-        Random seed for reproducibility.
-    n_splits : int
-        Number of cross-validation folds.
-    cv_strategy : str
-        Cross-validation strategy: 'kfold' or 'groupkfold'.
-    group_column : str
-        Column name for grouping (required when cv_strategy is 'groupkfold').
+    Experimental structure
+    ----------------------
+    - one dataframe row = one 1-minute recording;
+    - outer CV grouped by Point;
+    - inner CV grouped by Point;
+    - Optuna selects hyperparameters using inner OOF predictions;
+    - models are fitted with hierarchical Point/CapturePointId weights;
+    - predictions are produced independently for every 1-minute recording;
+    - k recordings are randomly sampled within each CapturePointId;
+    - sampled predictions are averaged to obtain a bag-level prediction;
+    - evaluation is balanced so every physical Point has equal total weight.
     """
 
     def __init__(
-        self, 
-        schema: Schema, 
-        output_dir: str, 
-        models: List[RegressionModels], 
-        random_state: int, 
-        n_splits: int,
-        cv_strategy: str,
-        group_column: str
+        self,
+        schema: Schema,
+        output_dir: str,
+        models: list[RegressionModels],
+        random_state: int,
+        feature_set: str,
+        pca_components: int | None,
+        outer_splits: int,
+        inner_splits: int,
+        optuna_trials: int,
+        inference_k: int,
+        inference_repeats: int,
     ) -> None:
-        self.schema       = schema
-        self.output_dir   = output_dir
-        self.models       = models
+        self.schema = schema
+        self.output_dir = output_dir
+        self.models = models
         self.random_state = random_state
-        self.n_splits     = n_splits
-        self.cv_strategy  = cv_strategy
-        self.group_column = group_column
 
-    def evaluate(self, df_processed: pd.DataFrame) -> None:
+        self.feature_set = feature_set
+        self.pca_components = pca_components
+
+        self.outer_splits = outer_splits
+        self.inner_splits = inner_splits
+
+        self.optuna_trials = optuna_trials
+
+        self.inference_k = inference_k
+        self.inference_repeats = inference_repeats
+
+    # =========================================================================
+    # PUBLIC API
+    # =========================================================================
+
+    def evaluate(
+        self,
+        df_processed: pd.DataFrame,
+    ) -> None:
         """
-        Execute k-fold cross-validation for all models.
-
-        Parameters
-        ----------
-        df_processed : pd.DataFrame
-            Preprocessed dataset including features and targets.
+        Evaluate every selected model using nested grouped cross-validation.
         """
-        X, y, groups = self._extract_X_y_groups(df_processed)
 
-        logger.info(f"Feature variables considered: {list(X.columns)}")
-        logger.info(f"Target variables considered: {list(y.columns)}")
+        X = df_processed.drop(
+            columns=[self.schema.target]
+        )
 
-        evaluation_results = ModelResults()
+        y = df_processed[
+            [self.schema.target]
+        ]
 
-        for idx, model_enum in enumerate(self.models, start=1):
-            logger.info(f"Evaluating model {idx}/{len(self.models)}: {model_enum.name}")
+        groups = df_processed[
+            self.schema.group
+        ].to_numpy()
 
-            fold_iterator = self._get_split_iterator(X, y, groups)
+        logger.info(
+            "Starting instance-MIR evaluation: "
+            "%d recordings, %d Points, feature_set=%s",
+            len(df_processed),
+            df_processed[self.schema.group].nunique(),
+            self.feature_set,
+        )
 
-            model_metrics = self._evaluate_model(
-                regressor=model_enum,
-                features=X,
-                target=y,
-                fold_iterator=fold_iterator
+        outer_metrics_rows: list[dict] = []
+        best_params_rows: list[dict] = []
+        oof_rows: list[pd.DataFrame] = []
+
+        for model_idx, model_enum in enumerate(
+            self.models,
+            start=1,
+        ):
+            logger.info(
+                "Evaluating model %d/%d: %s",
+                model_idx,
+                len(self.models),
+                model_enum.name,
             )
 
-            evaluation_results.add_model_result(model_metrics)
+            (
+                model_metrics,
+                model_params,
+                model_oof,
+            ) = self._evaluate_model(
+                model_enum=model_enum,
+                X=X,
+                y=y,
+                df=df_processed,
+                groups=groups,
+            )
 
-        df_summary = evaluation_results.get_summary()
-        df_summary.to_csv(os.path.join(self.output_dir, f"eval_summary.csv"))
+            outer_metrics_rows.extend(
+                model_metrics
+            )
 
-        plot_scores(df_summary, os.path.join(self.output_dir, "eval_scores"))
-        plot_times(df_summary, os.path.join(self.output_dir, "eval_times"))
+            best_params_rows.extend(
+                model_params
+            )
 
-        return None
-    
-    def _extract_X_y_groups(self, df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, Optional[np.ndarray]]:
-        """
-        Extract features, targets, and groups from the dataset.
+            oof_rows.append(
+                model_oof
+            )
 
-        Parameters
-        ----------
-        df : pd.DataFrame
-            Preprocessed dataset.
+        outer_metrics = pd.DataFrame(
+            outer_metrics_rows
+        )
 
-        Returns
-        -------
-        tuple[pd.DataFrame, pd.DataFrame, Optional[np.ndarray]]
-            Features DataFrame (all valid features), targets DataFrame, and groups array (if applicable).
-        """
-        cols_to_drop = list(self.schema.target_names)
-        groups = None
+        best_params = pd.DataFrame(
+            best_params_rows
+        )
 
-        if self.cv_strategy == "groupkfold":
-            if self.group_column not in df.columns:
-                raise ValueError(
-                    f"Column '{self.group_column}' not found in dataset."
-                )
-            logger.info(f"Using GroupKFold with group column '{self.group_column}'.")
+        oof_predictions = pd.concat(
+            oof_rows,
+            ignore_index=True,
+        )
 
-            groups = df[self.group_column].to_numpy()
-            cols_to_drop.append(self.group_column)
-        else:
-            logger.info("Using standard KFold cross-validation.")
+        summary = self._summarize_results(
+            outer_metrics=outer_metrics,
+            oof_predictions=oof_predictions,
+        )
 
-        X = df.drop(columns=cols_to_drop)
-        y = df[self.schema.target_names]
+        self._save_results(
+            outer_metrics=outer_metrics,
+            best_params=best_params,
+            oof_predictions=oof_predictions,
+            summary=summary,
+        )
 
-        return X, y, groups
-    
-    def _get_split_iterator(
+        save_evaluation_plots(
+            outer_metrics=outer_metrics,
+            summary=summary,
+            oof_predictions=oof_predictions,
+            output_dir=self.output_dir,
+            target_column=self.schema.target,
+            group_column=self.schema.group,
+            bag_column=self.schema.bag,
+            inference_k=self.inference_k,
+            inference_repeats=self.inference_repeats,
+            seed=self._pooled_inference_seed(),
+        )
+
+    # =========================================================================
+    # OUTER CROSS-VALIDATION
+    # =========================================================================
+
+    def _evaluate_model(
         self,
+        model_enum: RegressionModels,
         X: pd.DataFrame,
         y: pd.DataFrame,
-        groups: Optional[np.ndarray]
-    ) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+        df: pd.DataFrame,
+        groups: np.ndarray,
+    ) -> tuple[
+        list[dict],
+        list[dict],
+        pd.DataFrame,
+    ]:
         """
-        Generate a CV split iterator using KFold or GroupKFold.
-
-        Parameters
-        ----------
-        X : pd.DataFrame
-            Feature matrix.
-        y : pd.DataFrame
-            Target matrix aligned with X.
-        groups : Optional[np.ndarray]
-            Group memberships for GroupKFold;
-            should be None when using standard KFold.
-
-        Returns
-        -------
-        Iterator[tuple[np.ndarray, np.ndarray]]
-            Iterator yielding (train_index, test_index) tuples.
+        Evaluate one model across all outer folds.
         """
-        if self.cv_strategy == "groupkfold":
-            cv_splitter = GroupKFold(
-                n_splits=self.n_splits,
-                shuffle=True,                   # type: ignore
-                random_state=self.random_state  # type: ignore
-            )
-            return cv_splitter.split(X=X, y=y, groups=groups)
 
-        cv_splitter = KFold(
-            n_splits=self.n_splits,
+        outer_cv = GroupKFold(
+            n_splits=self.outer_splits,
             shuffle=True,
-            random_state=self.random_state
+            random_state=self.random_state,
         )
-        return cv_splitter.split(X=X, y=y)
 
-    @progress_bar
-    def _evaluate_model(
-            self,
-            regressor: RegressionModels,
-            features: pd.DataFrame,
-            target: pd.DataFrame,
-            fold_iterator: Iterator[tuple[np.ndarray, np.ndarray]]
-        ) -> ModelMetrics:
-        """
-        Run cross-validation for a single model.
+        metrics_rows: list[dict] = []
+        params_rows: list[dict] = []
+        prediction_rows: list[pd.DataFrame] = []
 
-        Parameters
-        ----------
-        regressor : RegressionModels
-            Model to evaluate.
-        features : pd.DataFrame
-            Feature dataset.
-        target : pd.DataFrame
-            Target dataset.
-        fold_iterator : Iterator[tuple[np.ndarray, np.ndarray]]
-            Iterator yielding train-test splits.
-
-        Returns
-        -------
-        ModelMetrics
-            Object containing all evaluation results for the model.
-        """
-        model_metrics = ModelMetrics(regressor)
-
-        for train_idx, test_idx in fold_iterator:
-            X_train, X_test = features.iloc[train_idx], features.iloc[test_idx]
-            y_train, y_test = target.iloc[train_idx], target.iloc[test_idx]
-
-            post_split_processor = PostSplitProcessor(self.schema)
-            X_train, y_train = post_split_processor.fit_transform(X_train, y_train)
-            X_test = post_split_processor.transform(X_test)
-
-            model_instance = ModelFactory.create_model(regressor)
-            fit_time = model_instance.fit(X_train, y_train)
-            
-            y_pred, prediction_time = model_instance.predict(X_test)
-            y_pred = post_split_processor.inverse_transform_target(y_pred)
-
-            r2_scores = r2_score(y_test, y_pred, multioutput='raw_values')
-            rmse_scores = root_mean_squared_error(y_test, y_pred, multioutput='raw_values')
-            mae_scores = mean_absolute_error(y_test, y_pred, multioutput='raw_values')
-
-            model_metrics.add_fold_result(
-                target_names=self.schema.target_names,
-                r2_scores=r2_scores.tolist(),
-                rmse_scores=rmse_scores.tolist(),
-                mae_scores=mae_scores.tolist(),
-                fit_time=fit_time,
-                pred_time=prediction_time,
+        for outer_fold, (
+            train_idx,
+            test_idx,
+        ) in enumerate(
+            outer_cv.split(
+                X,
+                y,
+                groups=groups,
+            ),
+            start=1,
+        ):
+            logger.info(
+                "%s — outer fold %d/%d",
+                model_enum.name,
+                outer_fold,
+                self.outer_splits,
             )
 
-        return model_metrics
+            X_train = X.iloc[train_idx]
+            X_test = X.iloc[test_idx]
+
+            y_train = y.iloc[train_idx]
+            y_test = y.iloc[test_idx]
+
+            df_train = df.iloc[train_idx]
+            df_test = df.iloc[test_idx]
+
+            best_params = self._optimize_hyperparameters(
+                model_enum=model_enum,
+                X=X_train,
+                y=y_train,
+                df=df_train,
+                outer_fold=outer_fold,
+            )
+
+            (
+                predictions,
+                fit_time,
+                prediction_time,
+            ) = self._fit_outer_model(
+                model_enum=model_enum,
+                params=best_params,
+                X_train=X_train,
+                y_train=y_train,
+                df_train=df_train,
+                X_test=X_test,
+            )
+
+            metrics = self._instance_mir_metrics(
+                df=df_test,
+                predictions=predictions,
+                seed=self._outer_inference_seed(
+                    outer_fold
+                ),
+            )
+
+            metrics_rows.append(
+                {
+                    "model": model_enum.name,
+                    "feature_set": self.feature_set,
+                    "outer_fold": outer_fold,
+                    "n_train_points": (
+                        df_train[
+                            self.schema.group
+                        ].nunique()
+                    ),
+                    "n_test_points": (
+                        df_test[
+                            self.schema.group
+                        ].nunique()
+                    ),
+                    "MAE": metrics.mae,
+                    "RMSE": metrics.rmse,
+                    "R2": metrics.r2,
+                    "fit_time": fit_time,
+                    "prediction_time": prediction_time,
+                }
+            )
+
+            params_rows.append(
+                {
+                    "model": model_enum.name,
+                    "feature_set": self.feature_set,
+                    "outer_fold": outer_fold,
+                    "best_params": json.dumps(
+                        best_params,
+                        sort_keys=True,
+                    ),
+                }
+            )
+
+            prediction_rows.append(
+                self._oof_dataframe(
+                    df_test=df_test,
+                    predictions=predictions,
+                    model_enum=model_enum,
+                    outer_fold=outer_fold,
+                )
+            )
+
+        return (
+            metrics_rows,
+            params_rows,
+            pd.concat(
+                prediction_rows,
+                ignore_index=True,
+            ),
+        )
+
+    # =========================================================================
+    # OPTUNA / INNER CROSS-VALIDATION
+    # =========================================================================
+
+    def _optimize_hyperparameters(
+        self,
+        model_enum: RegressionModels,
+        X: pd.DataFrame,
+        y: pd.DataFrame,
+        df: pd.DataFrame,
+        outer_fold: int,
+    ) -> dict:
+        """
+        Optimize one model using only the training data of an outer fold.
+
+        Every Optuna trial is evaluated from complete inner OOF predictions.
+        """
+
+        sampler = optuna.samplers.TPESampler(
+            seed=self._optuna_seed(
+                model_enum,
+                outer_fold,
+            )
+        )
+
+        study = optuna.create_study(
+            direction="minimize",
+            sampler=sampler,
+        )
+
+        def objective(
+            trial: optuna.Trial,
+        ) -> float:
+            params = suggest_parameters(
+                trial,
+                model_enum,
+            )
+
+            trial.set_user_attr(
+                "model_params",
+                params,
+            )
+
+            return self._inner_cv_score(
+                model_enum=model_enum,
+                params=params,
+                X=X,
+                y=y,
+                df=df,
+                outer_fold=outer_fold,
+            )
+
+        study.optimize(
+            objective,
+            n_trials=self.optuna_trials,
+            n_jobs=1,
+            show_progress_bar=False,
+        )
+
+        best_params = (
+            study.best_trial.user_attrs[
+                "model_params"
+            ]
+        )
+
+        logger.info(
+            "%s — outer fold %d — "
+            "best inner MIR-MAE: %.4f — params: %s",
+            model_enum.name,
+            outer_fold,
+            study.best_value,
+            best_params,
+        )
+
+        return best_params
+
+    def _inner_cv_score(
+        self,
+        model_enum: RegressionModels,
+        params: dict,
+        X: pd.DataFrame,
+        y: pd.DataFrame,
+        df: pd.DataFrame,
+        outer_fold: int,
+    ) -> float:
+        """
+        Evaluate one Optuna configuration using inner grouped CV.
+
+        Predictions from all inner validation folds are collected first.
+        The instance-MIR score is then calculated from these OOF predictions.
+        """
+
+        groups = df[
+            self.schema.group
+        ].to_numpy()
+
+        inner_cv = GroupKFold(
+            n_splits=self.inner_splits,
+            shuffle=True,
+            random_state=self._inner_cv_seed(
+                outer_fold
+            ),
+        )
+
+        inner_predictions = np.full(
+            len(df),
+            np.nan,
+            dtype=float,
+        )
+
+        for inner_train_idx, inner_val_idx in (
+            inner_cv.split(
+                X,
+                y,
+                groups=groups,
+            )
+        ):
+            X_train = X.iloc[
+                inner_train_idx
+            ]
+
+            X_val = X.iloc[
+                inner_val_idx
+            ]
+
+            y_train = y.iloc[
+                inner_train_idx
+            ]
+
+            df_train = df.iloc[
+                inner_train_idx
+            ]
+
+            processor = PostSplitProcessor(
+                schema=self.schema,
+                feature_set=self.feature_set,
+                pca_components=self.pca_components,
+            )
+
+            (
+                X_train_processed,
+                y_train_processed,
+            ) = processor.fit_transform(
+                X_train,
+                y_train,
+            )
+
+            X_val_processed = (
+                processor.transform(
+                    X_val
+                )
+            )
+
+            weights = self._hierarchical_weights(
+                df_train
+            )
+
+            model = ModelFactory.create_model(
+                model_enum,
+                params=params,
+            )
+
+            model.fit(
+                X_train_processed,
+                y_train_processed,
+                sample_weight=weights,
+            )
+
+            y_pred, _ = model.predict(
+                X_val_processed
+            )
+
+            y_pred = (
+                processor.inverse_transform_target(
+                    y_pred
+                )
+            )
+
+            inner_predictions[
+                inner_val_idx
+            ] = y_pred[
+                self.schema.target
+            ].to_numpy()
+
+        metrics = self._instance_mir_metrics(
+            df=df,
+            predictions=inner_predictions,
+            seed=self._inner_inference_seed(
+                outer_fold
+            ),
+        )
+
+        return metrics.mae
+
+    # =========================================================================
+    # FINAL FIT WITHIN EACH OUTER FOLD
+    # =========================================================================
+
+    def _fit_outer_model(
+        self,
+        model_enum: RegressionModels,
+        params: dict,
+        X_train: pd.DataFrame,
+        y_train: pd.DataFrame,
+        df_train: pd.DataFrame,
+        X_test: pd.DataFrame,
+    ) -> tuple[
+        np.ndarray,
+        float,
+        float,
+    ]:
+        """
+        Fit the selected inner-CV configuration on the complete outer
+        training set and predict every individual outer-test recording.
+        """
+
+        processor = PostSplitProcessor(
+            schema=self.schema,
+            feature_set=self.feature_set,
+            pca_components=self.pca_components,
+        )
+
+        (
+            X_train_processed,
+            y_train_processed,
+        ) = processor.fit_transform(
+            X_train,
+            y_train,
+        )
+
+        X_test_processed = processor.transform(
+            X_test
+        )
+
+        weights = self._hierarchical_weights(
+            df_train
+        )
+
+        model = ModelFactory.create_model(
+            model_enum,
+            params=params,
+        )
+
+        fit_time = model.fit(
+            X_train_processed,
+            y_train_processed,
+            sample_weight=weights,
+        )
+
+        y_pred, prediction_time = model.predict(
+            X_test_processed
+        )
+
+        y_pred = processor.inverse_transform_target(
+            y_pred
+        )
+
+        predictions = y_pred[
+            self.schema.target
+        ].to_numpy()
+
+        return (
+            predictions,
+            fit_time,
+            prediction_time,
+        )
+
+    # =========================================================================
+    # HIERARCHICAL TRAINING WEIGHTS
+    # =========================================================================
+
+    def _hierarchical_weights(
+        self,
+        df: pd.DataFrame,
+    ) -> np.ndarray:
+        """
+        Give every Point the same total training weight.
+
+        Within each Point:
+        - weight is divided equally among CapturePointIds;
+        - each CapturePointId weight is divided equally among its recordings.
+        """
+
+        n_captures = (
+            df.groupby(
+                self.schema.group
+            )[self.schema.bag]
+            .transform("nunique")
+            .to_numpy()
+        )
+
+        n_instances = (
+            df.groupby(
+                [
+                    self.schema.group,
+                    self.schema.bag,
+                ]
+            )[self.schema.bag]
+            .transform("size")
+            .to_numpy()
+        )
+
+        weights = (
+            1.0
+            / (
+                n_captures
+                * n_instances
+            )
+        )
+
+        return weights / weights.mean()
+
+    # =========================================================================
+    # INSTANCE-MIR INFERENCE
+    # =========================================================================
+
+    def _instance_mir_metrics(
+        self,
+        df: pd.DataFrame,
+        predictions: np.ndarray,
+        seed: int,
+    ) -> MIRMetrics:
+        """
+        Evaluate predictions using the fixed-k instance-MIR rule.
+
+        For each repetition:
+        1. randomly select k recordings within every CapturePointId;
+        2. average their individual HFI predictions;
+        3. evaluate CapturePointId predictions with Point-balanced weights.
+
+        The returned metrics are averages across the repeated random samples.
+        """
+
+        inference_df = df[
+            [
+                self.schema.group,
+                self.schema.bag,
+                self.schema.target,
+            ]
+        ].copy()
+
+        inference_df["prediction"] = (
+            predictions
+        )
+
+        repeated_metrics: list[
+            MIRMetrics
+        ] = []
+
+        for repeat in range(
+            self.inference_repeats
+        ):
+            rng = np.random.default_rng(
+                seed + repeat
+            )
+
+            capture_rows: list[dict] = []
+
+            for (
+                point,
+                capture,
+            ), capture_df in inference_df.groupby(
+                [
+                    self.schema.group,
+                    self.schema.bag,
+                ],
+                sort=False,
+            ):
+                selected_positions = rng.choice(
+                    len(capture_df),
+                    size=self.inference_k,
+                    replace=False,
+                )
+
+                selected = capture_df.iloc[
+                    selected_positions
+                ]
+
+                capture_rows.append(
+                    {
+                        self.schema.group: point,
+                        self.schema.bag: capture,
+                        "observed": (
+                            selected[
+                                self.schema.target
+                            ].mean()
+                        ),
+                        "prediction": (
+                            selected[
+                                "prediction"
+                            ].mean()
+                        ),
+                    }
+                )
+
+            capture_predictions = (
+                pd.DataFrame(
+                    capture_rows
+                )
+            )
+
+            point_weights = (
+                1.0
+                / capture_predictions.groupby(
+                    self.schema.group
+                )[self.schema.bag]
+                .transform("nunique")
+                .to_numpy()
+            )
+
+            observed = capture_predictions[
+                "observed"
+            ].to_numpy()
+
+            predicted = capture_predictions[
+                "prediction"
+            ].to_numpy()
+
+            repeated_metrics.append(
+                MIRMetrics(
+                    mae=mean_absolute_error(
+                        observed,
+                        predicted,
+                        sample_weight=point_weights,
+                    ),
+                    rmse=root_mean_squared_error(
+                        observed,
+                        predicted,
+                        sample_weight=point_weights,
+                    ),
+                    r2=r2_score(
+                        observed,
+                        predicted,
+                        sample_weight=point_weights,
+                    ),
+                )
+            )
+
+        return MIRMetrics(
+            mae=float(
+                np.mean(
+                    [
+                        metric.mae
+                        for metric
+                        in repeated_metrics
+                    ]
+                )
+            ),
+            rmse=float(
+                np.mean(
+                    [
+                        metric.rmse
+                        for metric
+                        in repeated_metrics
+                    ]
+                )
+            ),
+            r2=float(
+                np.mean(
+                    [
+                        metric.r2
+                        for metric
+                        in repeated_metrics
+                    ]
+                )
+            ),
+        )
+
+    # =========================================================================
+    # OOF PREDICTIONS
+    # =========================================================================
+
+    def _oof_dataframe(
+        self,
+        df_test: pd.DataFrame,
+        predictions: np.ndarray,
+        model_enum: RegressionModels,
+        outer_fold: int,
+    ) -> pd.DataFrame:
+        """
+        Store individual recording-level outer-fold predictions.
+
+        No prediction aggregation is performed here. These predictions are
+        retained for the later k=1,...,K accumulation experiment.
+        """
+
+        columns = [
+            self.schema.group,
+            self.schema.bag,
+            *self.schema.instance_columns,
+            self.schema.target,
+        ]
+
+        result = df_test[
+            columns
+        ].copy()
+
+        result["prediction"] = predictions
+        result["outer_fold"] = outer_fold
+        result["model"] = model_enum.name
+        result["feature_set"] = (
+            self.feature_set
+        )
+
+        return result
+
+    # =========================================================================
+    # SUMMARY
+    # =========================================================================
+
+    def _summarize_results(
+        self,
+        outer_metrics: pd.DataFrame,
+        oof_predictions: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """
+        Summarize outer-fold performance and calculate pooled OOF
+        instance-MIR performance for each model.
+        """
+
+        rows: list[dict] = []
+
+        for model_enum in self.models:
+            model_name = model_enum.name
+
+            fold_data = outer_metrics[
+                outer_metrics["model"]
+                == model_name
+            ]
+
+            model_oof = oof_predictions[
+                oof_predictions["model"]
+                == model_name
+            ]
+
+            pooled_metrics = (
+                self._instance_mir_metrics(
+                    df=model_oof,
+                    predictions=model_oof[
+                        "prediction"
+                    ].to_numpy(),
+                    seed=self._pooled_inference_seed(),
+                )
+            )
+
+            rows.append(
+                {
+                    "model": model_name,
+                    "feature_set": (
+                        self.feature_set
+                    ),
+                    "MAE_mean": (
+                        fold_data["MAE"].mean()
+                    ),
+                    "MAE_std": (
+                        fold_data["MAE"].std()
+                    ),
+                    "RMSE_mean": (
+                        fold_data["RMSE"].mean()
+                    ),
+                    "RMSE_std": (
+                        fold_data["RMSE"].std()
+                    ),
+                    "R2_mean": (
+                        fold_data["R2"].mean()
+                    ),
+                    "R2_std": (
+                        fold_data["R2"].std()
+                    ),
+                    "OOF_MAE": (
+                        pooled_metrics.mae
+                    ),
+                    "OOF_RMSE": (
+                        pooled_metrics.rmse
+                    ),
+                    "OOF_R2": (
+                        pooled_metrics.r2
+                    ),
+                    "fit_time_mean": (
+                        fold_data[
+                            "fit_time"
+                        ].mean()
+                    ),
+                    "prediction_time_mean": (
+                        fold_data[
+                            "prediction_time"
+                        ].mean()
+                    ),
+                }
+            )
+
+        return (
+            pd.DataFrame(rows)
+            .sort_values(
+                "OOF_MAE",
+                ascending=True,
+            )
+            .reset_index(
+                drop=True
+            )
+        )
+
+    # =========================================================================
+    # OUTPUT
+    # =========================================================================
+
+    def _save_results(
+        self,
+        outer_metrics: pd.DataFrame,
+        best_params: pd.DataFrame,
+        oof_predictions: pd.DataFrame,
+        summary: pd.DataFrame,
+    ) -> None:
+        """
+        Save the results required for model comparison and later
+        accumulation analysis.
+        """
+
+        os.makedirs(
+            self.output_dir,
+            exist_ok=True,
+        )
+
+        summary.to_csv(
+            os.path.join(
+                self.output_dir,
+                "eval_summary.csv",
+            ),
+            index=False,
+        )
+
+        outer_metrics.to_csv(
+            os.path.join(
+                self.output_dir,
+                "outer_fold_metrics.csv",
+            ),
+            index=False,
+        )
+
+        best_params.to_csv(
+            os.path.join(
+                self.output_dir,
+                "best_params.csv",
+            ),
+            index=False,
+        )
+
+        oof_predictions.to_csv(
+            os.path.join(
+                self.output_dir,
+                "oof_predictions.csv",
+            ),
+            index=False,
+        )
+
+        logger.info(
+            "Evaluation results saved to %s",
+            self.output_dir,
+        )
+
+    # =========================================================================
+    # REPRODUCIBLE RANDOM SEEDS
+    # =========================================================================
+
+    def _inner_cv_seed(
+        self,
+        outer_fold: int,
+    ) -> int:
+        return (
+            self.random_state
+            + 1_000
+            + outer_fold
+        )
+
+    def _inner_inference_seed(
+        self,
+        outer_fold: int,
+    ) -> int:
+        """
+        Same sampling seed for every Optuna trial within an outer fold.
+
+        This ensures hyperparameter configurations are compared using
+        exactly the same sampled recordings.
+        """
+        return (
+            self.random_state
+            + 10_000
+            + outer_fold
+        )
+
+    def _outer_inference_seed(
+        self,
+        outer_fold: int,
+    ) -> int:
+        """
+        Same outer-test sampling for every model.
+        """
+        return (
+            self.random_state
+            + 20_000
+            + outer_fold
+        )
+
+    def _pooled_inference_seed(
+        self,
+    ) -> int:
+        """
+        Same pooled-OOF sampling for every model.
+        """
+        return (
+            self.random_state
+            + 30_000
+        )
+
+    def _optuna_seed(
+        self,
+        model_enum: RegressionModels,
+        outer_fold: int,
+    ) -> int:
+        return (
+            self.random_state
+            + 40_000
+            + 100 * model_enum.value
+            + outer_fold
+        )

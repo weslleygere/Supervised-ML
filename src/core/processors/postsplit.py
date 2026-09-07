@@ -1,143 +1,192 @@
+import numpy as np
 import pandas as pd
-from sklearn.preprocessing import RobustScaler
+
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import RobustScaler, StandardScaler
 
 from src.core.data.schema import Schema
 
 
 class PostSplitProcessor:
     """
-    Applies post-split preprocessing transformations to numerical features and targets,
-    including robust scaling.
+    Apply fold-specific preprocessing for the selected feature representation.
 
-    Parameters
-    ----------
-    schema : Schema
-        Schema object defining features and targets.
+    Acoustic indices and embeddings are processed separately:
+    - indices: RobustScaler
+    - embeddings: StandardScaler + optional PCA
+    - both: concatenate the two processed blocks
 
-    Attributes
-    ----------
-    schema : Schema
-        Schema object for features and targets.
-    feature_numerical_cols : list[str]
-        List of numerical feature column names.
-    target_numerical_cols : list[str]
-        List of target column names.
-    feature_scaler : RobustScaler
-        Scaler for numerical features using robust scaling.
-    target_scaler : RobustScaler
-        Scaler for target variables.
+    Target scaling follows the original pipeline behavior.
     """
 
-    def __init__(self, schema: Schema) -> None:
+    def __init__(
+        self,
+        schema: Schema,
+        feature_set: str,
+        pca_components: int | None,
+    ) -> None:
+        self.schema = schema
+        self.feature_set = feature_set
+        self.pca_components = pca_components
 
-        self.feature_numerical_cols: list[str] = schema.valid_feature_names
-        self.target_numerical_cols : list[str] = schema.target_names
+        self.index_scaler = RobustScaler()
+        self.embedding_scaler = StandardScaler()
+        self.target_scaler = RobustScaler()
 
-        self.feature_scaler: RobustScaler = RobustScaler()
-        self.target_scaler : RobustScaler = RobustScaler()
+        self.pca = (
+            PCA(n_components=pca_components, svd_solver="full")
+            if pca_components is not None
+            else None
+        )
+
+        self.index_cols: list[str] = []
 
     def fit_transform(
         self,
         x_train: pd.DataFrame,
-        y_train: pd.DataFrame
+        y_train: pd.DataFrame,
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
         """
-        Fit the scalers on training data and apply transformations.
-
-        Parameters
-        ----------
-        x_train : pd.DataFrame
-            Training feature set.
-        y_train : pd.DataFrame
-            Training target values.
-
-        Returns
-        -------
-        x_train_transformed : pd.DataFrame
-            Transformed training feature set.
-        y_train_transformed : pd.DataFrame
-            Transformed training target values.
+        Fit preprocessing using training data and transform train features/target.
         """
-        x_train = x_train.copy()
-        y_train = y_train.copy()
+        x_train_transformed = self._fit_transform_features(x_train)
 
-        feature_cols_to_scale = [
-            col for col in self.feature_numerical_cols if col in x_train.columns
-        ]
-        target_cols_to_scale = [
-            col for col in self.target_numerical_cols if col in y_train.columns
-        ]
-
-        if feature_cols_to_scale:
-            x_train[feature_cols_to_scale] = x_train[feature_cols_to_scale].astype('float64')
-            x_train.loc[:, feature_cols_to_scale] = self.feature_scaler.fit_transform(
-                x_train[feature_cols_to_scale]
+        y_train_transformed = y_train.copy()
+        y_train_transformed.loc[:, [self.schema.target]] = (
+            self.target_scaler.fit_transform(
+                y_train_transformed[[self.schema.target]]
             )
+        )
 
-        if target_cols_to_scale:
-            y_train[target_cols_to_scale] = y_train[target_cols_to_scale].astype('float64')
-            y_train.loc[:, target_cols_to_scale] = self.target_scaler.fit_transform(
-                y_train[target_cols_to_scale]
-            )
-
-        return x_train, y_train
+        return x_train_transformed, y_train_transformed
 
     def transform(self, x_test: pd.DataFrame) -> pd.DataFrame:
         """
-        Apply scaling to test data using fitted parameters.
-
-        Parameters
-        ----------
-        x_test : pd.DataFrame
-            Test feature set.
-
-        Returns
-        -------
-        x_test_transformed : pd.DataFrame
-            Transformed test feature set.
+        Transform test features using preprocessing fitted on training data.
         """
-        if not hasattr(self.feature_scaler, "scale_"):
-            raise ValueError("Scaler has not been fitted. Call fit_transform first.")
+        parts: list[pd.DataFrame] = []
 
-        x_test = x_test.copy()
+        if self.feature_set in {"indices", "both"}:
+            parts.append(self._transform_indices(x_test))
 
-        feature_cols_to_scale = [
-            col for col in self.feature_numerical_cols if col in x_test.columns
-        ]
-        if feature_cols_to_scale:
-            x_test[feature_cols_to_scale] = x_test[feature_cols_to_scale].astype('float64')
-            x_test.loc[:, feature_cols_to_scale] = self.feature_scaler.transform(
-                x_test[feature_cols_to_scale]
-            )
+        if self.feature_set in {"embeddings", "both"}:
+            parts.append(self._transform_embeddings(x_test))
 
-        return x_test
+        return pd.concat(parts, axis=1)
 
-    def inverse_transform_target(self, y_pred: pd.DataFrame) -> pd.DataFrame:
+    def inverse_transform_target(
+        self,
+        y_pred: pd.DataFrame,
+    ) -> pd.DataFrame:
         """
-        Invert the scaling transformation on predicted target values.
-
-        Parameters
-        ----------
-        y_pred : pd.DataFrame
-            Scaled predictions to be transformed back to original scale.
-
-        Returns
-        -------
-        y_pred_original : pd.DataFrame
-            Predictions in the original target scale.
+        Transform predicted HFI values back to the original scale.
         """
-        if not hasattr(self.target_scaler, "scale_"):
-            raise ValueError("Target scaler has not been fitted. Call fit_transform first.")
-
         y_pred = y_pred.copy()
 
-        target_cols_to_scale = [
-            col for col in self.target_numerical_cols if col in y_pred.columns
-        ]
-
-        if target_cols_to_scale:
-            y_pred.loc[:, target_cols_to_scale] = self.target_scaler.inverse_transform(
-                y_pred[target_cols_to_scale]
+        y_pred.loc[:, [self.schema.target]] = (
+            self.target_scaler.inverse_transform(
+                y_pred[[self.schema.target]]
             )
+        )
 
         return y_pred
+
+    def _fit_transform_features(
+        self,
+        x_train: pd.DataFrame,
+    ) -> pd.DataFrame:
+        parts: list[pd.DataFrame] = []
+
+        if self.feature_set in {"indices", "both"}:
+            parts.append(self._fit_transform_indices(x_train))
+
+        if self.feature_set in {"embeddings", "both"}:
+            parts.append(self._fit_transform_embeddings(x_train))
+
+        return pd.concat(parts, axis=1)
+
+    def _fit_transform_indices(
+        self,
+        x_train: pd.DataFrame,
+    ) -> pd.DataFrame:
+        self.index_cols = self.schema.index_columns(x_train.columns)
+
+        values = self.index_scaler.fit_transform(
+            x_train[self.index_cols]
+        )
+
+        return pd.DataFrame(
+            values,
+            columns=self.index_cols,
+            index=x_train.index,
+        )
+
+    def _transform_indices(
+        self,
+        x_test: pd.DataFrame,
+    ) -> pd.DataFrame:
+        values = self.index_scaler.transform(
+            x_test[self.index_cols]
+        )
+
+        return pd.DataFrame(
+            values,
+            columns=self.index_cols,
+            index=x_test.index,
+        )
+
+    def _fit_transform_embeddings(
+        self,
+        x_train: pd.DataFrame,
+    ) -> pd.DataFrame:
+        matrix = np.stack(
+            x_train[self.schema.embedding].to_numpy()
+        )
+
+        matrix = self.embedding_scaler.fit_transform(matrix)
+
+        if self.pca is not None:
+            matrix = self.pca.fit_transform(matrix)
+            columns = [
+                f"embedding_pc_{i + 1}"
+                for i in range(matrix.shape[1])
+            ]
+        else:
+            columns = [
+                f"embedding_{i + 1}"
+                for i in range(matrix.shape[1])
+            ]
+
+        return pd.DataFrame(
+            matrix,
+            columns=columns,
+            index=x_train.index,
+        )
+
+    def _transform_embeddings(
+        self,
+        x_test: pd.DataFrame,
+    ) -> pd.DataFrame:
+        matrix = np.stack(
+            x_test[self.schema.embedding].to_numpy()
+        )
+
+        matrix = self.embedding_scaler.transform(matrix)
+
+        if self.pca is not None:
+            matrix = self.pca.transform(matrix)
+            columns = [
+                f"embedding_pc_{i + 1}"
+                for i in range(matrix.shape[1])
+            ]
+        else:
+            columns = [
+                f"embedding_{i + 1}"
+                for i in range(matrix.shape[1])
+            ]
+
+        return pd.DataFrame(
+            matrix,
+            columns=columns,
+            index=x_test.index,
+        )

@@ -1,351 +1,278 @@
-import re
 import time
 from typing import Optional
 
-import torch
+import numpy as np
 import pandas as pd
+
+from sklearn.ensemble import ExtraTreesRegressor, RandomForestRegressor
+from sklearn.linear_model import ElasticNet, Ridge
 from sklearn.svm import SVR
 from xgboost import XGBRegressor
-from lightgbm import LGBMRegressor
-from catboost import CatBoostRegressor
-from sklearn.tree import DecisionTreeRegressor
-from sklearn.neural_network import MLPRegressor
-from sklearn.neighbors import KNeighborsRegressor
-from sklearn.multioutput import MultiOutputRegressor
-from sklearn.cross_decomposition import PLSRegression
-from sklearn.linear_model import LinearRegression, Ridge, Lasso, ElasticNet
-from sklearn.ensemble import ExtraTreesRegressor, RandomForestRegressor, AdaBoostRegressor
+
 
 class AbstractModel:
     """
-    Abstract base class for all model implementations.
-
-    Attributes
-    ----------
-    seed : int
-        Global random seed for reproducibility, set externally via configuration.
-    device : str
-        Indicates 'cuda' if a compatible GPU is detected by PyTorch, otherwise 'cpu'.
+    Base class for the regression models used in the instance-MIR experiment.
     """
+
     seed: Optional[int] = None
-    device: str = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     def __init__(self) -> None:
-        pass
+        self.target_columns: list[str] = []
 
-    def fit(self, x: pd.DataFrame, y: pd.DataFrame) -> float:
+    def fit(
+        self,
+        x: pd.DataFrame,
+        y: pd.DataFrame,
+        sample_weight: np.ndarray | None = None,
+    ) -> float:
         """
-        Fit the model to the training data.
-
-        Parameters
-        ----------
-            x : pd.DataFrame
-                The input features for training.
-            y : pd.DataFrame
-                The target variable for training.
-
-        Returns
-        -------
-            float
-                The time taken to fit the model.
+        Fit the model and return training time.
         """
+        self.target_columns = list(y.columns)
+
         start = time.perf_counter()
-        self._fit(x, y)
+        self._fit(x, y, sample_weight)
+
         return time.perf_counter() - start
 
-    def predict(self, x: pd.DataFrame) -> tuple[pd.DataFrame, float]:
+    def predict(
+        self,
+        x: pd.DataFrame,
+    ) -> tuple[pd.DataFrame, float]:
         """
-        Generate predictions using the fitted model.
-        
-        Parameters
-        ----------
-            x : pd.DataFrame
-                The input features for prediction.
-        Returns
-        -------
-        tuple[pd.DataFrame, float]
-            The predicted values and the time taken to generate the predictions.
+        Generate predictions and return prediction time.
         """
         start = time.perf_counter()
-        preds = self._predict(x)
-        return preds, time.perf_counter() - start
+        predictions = self._predict(x)
+        elapsed = time.perf_counter() - start
 
-    def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
-        """
-        Fit the model to the training data.
+        predictions = np.asarray(predictions).reshape(-1, 1)
 
-        Parameters
-        ----------
-            x : pd.DataFrame
-                The input features for training.
-            y : pd.DataFrame
-                The target variable for training.
-        """
-        raise NotImplementedError("Subclasses must implement the _fit method.")
+        return (
+            pd.DataFrame(
+                predictions,
+                columns=self.target_columns,
+                index=x.index,
+            ),
+            elapsed,
+        )
 
-    def _predict(self, x: pd.DataFrame) -> pd.DataFrame:
-        """
-        Generate predictions using the fitted model.
+    def _fit(
+        self,
+        x: pd.DataFrame,
+        y: pd.DataFrame,
+        sample_weight: np.ndarray | None = None,
+    ) -> None:
+        raise NotImplementedError
 
-        Parameters
-        ----------
-            x : pd.DataFrame
-                The input features for prediction.
+    def _predict(
+        self,
+        x: pd.DataFrame,
+    ) -> np.ndarray:
+        raise NotImplementedError
 
-        Returns
-        -------
-            pd.DataFrame
-                The predicted values.
-        """
-        raise NotImplementedError("Subclasses must implement the _predict method.")
-    
     @staticmethod
-    def _sanitize_feature_names(x: pd.DataFrame) -> pd.DataFrame:
-        """
-        Sanitize feature names by removing characters that cause issues in XGBoost/LightGBM/etc.
-        Removes: [, ], <, >, {, }, (, )
-        
-        Parameters
-        ----------
-        x : pd.DataFrame
-            Input DataFrame with potentially problematic feature names.
-            
-        Returns
-        -------
-        pd.DataFrame
-            DataFrame with sanitized column names.
-        """
-        x_clean = x.copy()
-        x_clean.columns = [re.sub(r'[\[\]<>{}()]', '', col) for col in x_clean.columns]
-        return x_clean
+    def _target_values(
+        y: pd.DataFrame,
+    ) -> np.ndarray:
+        """Convert the single-target dataframe to a 1D array."""
+        return y.iloc[:, 0].to_numpy()
 
     @property
-    def name(self):
-        return self.__class__.__name__.replace("Model", "").replace("_", " ").title()
-    
-# ======================================================
-#                    Linear Models
-# ======================================================
+    def name(self) -> str:
+        return (
+            self.__class__.__name__
+            .replace("Model", "")
+            .replace("_", " ")
+            .title()
+        )
 
-class LinearRegressionModel(AbstractModel):
-    """Linear Regression Model."""
-    def __init__(self) -> None:
-        super().__init__()
-        self.model = MultiOutputRegressor(LinearRegression())
 
-    def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
-        self.model.fit(x, y)
-
-    def _predict(self, x: pd.DataFrame) -> pd.DataFrame:
-        return pd.DataFrame(self.model.predict(x))  # type: ignore
+# =============================================================================
+# REGULARIZED LINEAR MODELS
+# =============================================================================
 
 
 class RidgeRegressionModel(AbstractModel):
-    """Ridge Regression Model."""
-    def __init__(self) -> None:
+    """Ridge Regression."""
+
+    def __init__(self, **params) -> None:
         super().__init__()
-        self.model = MultiOutputRegressor(Ridge(random_state=AbstractModel.seed))
+        self.model = Ridge(**params)
 
-    def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
-        self.model.fit(x, y)
+    def _fit(
+        self,
+        x: pd.DataFrame,
+        y: pd.DataFrame,
+        sample_weight: np.ndarray | None = None,
+    ) -> None:
+        self.model.fit(
+            x,
+            self._target_values(y),
+            sample_weight=sample_weight,
+        )
 
-    def _predict(self, x: pd.DataFrame) -> pd.DataFrame:
-        return pd.DataFrame(self.model.predict(x)) # type: ignore
-
-
-class LassoRegressionModel(AbstractModel):
-    """Lasso Regression Model."""
-    def __init__(self) -> None:
-        super().__init__()
-        self.model = MultiOutputRegressor(Lasso(random_state=AbstractModel.seed))
-
-    def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
-        self.model.fit(x, y)
-
-    def _predict(self, x: pd.DataFrame) -> pd.DataFrame:
-        return pd.DataFrame(self.model.predict(x)) # type: ignore
+    def _predict(
+        self,
+        x: pd.DataFrame,
+    ) -> np.ndarray:
+        return self.model.predict(x)
 
 
 class ElasticNetModel(AbstractModel):
-    """ElasticNet Regression Model."""
-    def __init__(self) -> None:
+    """Elastic Net Regression."""
+
+    def __init__(self, **params) -> None:
         super().__init__()
-        self.model = MultiOutputRegressor(ElasticNet(random_state=AbstractModel.seed))
 
-    def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
-        self.model.fit(x, y)
+        params.setdefault("random_state", AbstractModel.seed)
 
-    def _predict(self, x: pd.DataFrame) -> pd.DataFrame:
-        return pd.DataFrame(self.model.predict(x)) # type: ignore
-    
+        self.model = ElasticNet(**params)
 
-class PLSRegressorModel(AbstractModel):
-    """Partial Least Squares Regressor model."""
-    def __init__(self) -> None:
+    def _fit(
+        self,
+        x: pd.DataFrame,
+        y: pd.DataFrame,
+        sample_weight: np.ndarray | None = None,
+    ) -> None:
+        self.model.fit(
+            x,
+            self._target_values(y),
+            sample_weight=sample_weight,
+        )
+
+    def _predict(
+        self,
+        x: pd.DataFrame,
+    ) -> np.ndarray:
+        return self.model.predict(x)
+
+
+# =============================================================================
+# KERNEL MODEL
+# =============================================================================
+
+
+class SVRModel(AbstractModel):
+    """Support Vector Regression."""
+
+    def __init__(self, **params) -> None:
         super().__init__()
-        self.model = PLSRegression(n_components=2)
 
-    def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
-        self.model.fit(x, y)
+        params.setdefault("kernel", "rbf")
 
-    def _predict(self, x: pd.DataFrame) -> pd.DataFrame:
-        return pd.DataFrame(self.model.predict(x))
-    
-# ======================================================
-#                Non-Parametric Models
-# ======================================================
+        self.model = SVR(**params)
 
-class KNeighborsModel(AbstractModel):
-    """K-Nearest Neighbors Regressor."""
-    def __init__(self) -> None:
-        super().__init__()
-        self.model = MultiOutputRegressor(KNeighborsRegressor())
+    def _fit(
+        self,
+        x: pd.DataFrame,
+        y: pd.DataFrame,
+        sample_weight: np.ndarray | None = None,
+    ) -> None:
+        self.model.fit(
+            x,
+            self._target_values(y),
+            sample_weight=sample_weight,
+        )
 
-    def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
-        x_clean = self._sanitize_feature_names(x)
-        self.model.fit(x_clean, y)
+    def _predict(
+        self,
+        x: pd.DataFrame,
+    ) -> np.ndarray:
+        return self.model.predict(x)
 
-    def _predict(self, x: pd.DataFrame) -> pd.DataFrame:
-        x_clean = self._sanitize_feature_names(x)
-        return pd.DataFrame(self.model.predict(x_clean)) # type: ignore
-    
-# ======================================================
-#                Ensemble Models
-# ======================================================
-    
-class DecisionTreeModel(AbstractModel):
-    """Decision Tree Regressor."""
-    def __init__(self) -> None:
-        super().__init__()
-        self.model = MultiOutputRegressor(DecisionTreeRegressor(random_state=AbstractModel.seed))
 
-    def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
-        x_clean = self._sanitize_feature_names(x)
-        self.model.fit(x_clean, y)
+# =============================================================================
+# TREE ENSEMBLES
+# =============================================================================
 
-    def _predict(self, x: pd.DataFrame) -> pd.DataFrame:
-        x_clean = self._sanitize_feature_names(x)
-        return pd.DataFrame(self.model.predict(x_clean)) # type: ignore
-    
 
 class RandomForestModel(AbstractModel):
-    """Random Forest Regressor model."""
-    def __init__(self) -> None:
+    """Random Forest Regressor."""
+
+    def __init__(self, **params) -> None:
         super().__init__()
-        self.model = RandomForestRegressor(random_state=AbstractModel.seed)
 
-    def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
-        x_clean = self._sanitize_feature_names(x)
-        self.model.fit(x_clean, y)
+        params.setdefault("random_state", AbstractModel.seed)
+        params.setdefault("n_jobs", -1)
 
-    def _predict(self, x: pd.DataFrame) -> pd.DataFrame:
-        x_clean = self._sanitize_feature_names(x)
-        return pd.DataFrame(self.model.predict(x_clean))
-    
+        self.model = RandomForestRegressor(**params)
+
+    def _fit(
+        self,
+        x: pd.DataFrame,
+        y: pd.DataFrame,
+        sample_weight: np.ndarray | None = None,
+    ) -> None:
+        self.model.fit(
+            x,
+            self._target_values(y),
+            sample_weight=sample_weight,
+        )
+
+    def _predict(
+        self,
+        x: pd.DataFrame,
+    ) -> np.ndarray:
+        return self.model.predict(x)
+
 
 class ExtraTreesModel(AbstractModel):
     """Extra Trees Regressor."""
-    def __init__(self) -> None:
+
+    def __init__(self, **params) -> None:
         super().__init__()
-        self.model = MultiOutputRegressor(ExtraTreesRegressor(random_state=AbstractModel.seed))
 
-    def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
-        x_clean = self._sanitize_feature_names(x)
-        self.model.fit(x_clean, y)
+        params.setdefault("random_state", AbstractModel.seed)
+        params.setdefault("n_jobs", -1)
 
-    def _predict(self, x: pd.DataFrame) -> pd.DataFrame:
-        x_clean = self._sanitize_feature_names(x)
-        return pd.DataFrame(self.model.predict(x_clean)) # type: ignore
+        self.model = ExtraTreesRegressor(**params)
 
-class AdaBoostModel(AbstractModel):
-    """AdaBoost Regressor."""
-    def __init__(self) -> None:
-        super().__init__()
-        self.model = MultiOutputRegressor(AdaBoostRegressor(random_state=AbstractModel.seed))
+    def _fit(
+        self,
+        x: pd.DataFrame,
+        y: pd.DataFrame,
+        sample_weight: np.ndarray | None = None,
+    ) -> None:
+        self.model.fit(
+            x,
+            self._target_values(y),
+            sample_weight=sample_weight,
+        )
 
-    def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
-        x_clean = self._sanitize_feature_names(x)
-        self.model.fit(x_clean, y)
+    def _predict(
+        self,
+        x: pd.DataFrame,
+    ) -> np.ndarray:
+        return self.model.predict(x)
 
-    def _predict(self, x: pd.DataFrame) -> pd.DataFrame:
-        x_clean = self._sanitize_feature_names(x)
-        return pd.DataFrame(self.model.predict(x_clean)) # type: ignore
 
 class XGBoostModel(AbstractModel):
-    """XGBoost Regressor model."""
-    def __init__(self) -> None:
+    """XGBoost Regressor."""
+
+    def __init__(self, **params) -> None:
         super().__init__()
-        self.model = XGBRegressor(random_state=AbstractModel.seed)
 
-    def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
-        x_clean = self._sanitize_feature_names(x)
-        self.model.fit(x_clean, y)
+        params.setdefault("random_state", AbstractModel.seed)
+        params.setdefault("n_jobs", -1)
 
-    def _predict(self, x: pd.DataFrame) -> pd.DataFrame:
-        x_clean = self._sanitize_feature_names(x)
-        return pd.DataFrame(self.model.predict(x_clean))
-    
-class LightGBMModel(AbstractModel):
-    """LightGBM Regressor."""
-    def __init__(self) -> None:
-        super().__init__()
-        self.model = MultiOutputRegressor(LGBMRegressor(random_state=AbstractModel.seed, verbosity=-1)) # type: ignore
+        self.model = XGBRegressor(**params)
 
-    def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
-        x_clean = self._sanitize_feature_names(x)
-        self.model.fit(x_clean, y)
+    def _fit(
+        self,
+        x: pd.DataFrame,
+        y: pd.DataFrame,
+        sample_weight: np.ndarray | None = None,
+    ) -> None:
+        self.model.fit(
+            x,
+            self._target_values(y),
+            sample_weight=sample_weight,
+        )
 
-    def _predict(self, x: pd.DataFrame) -> pd.DataFrame:
-        x_clean = self._sanitize_feature_names(x)
-        return pd.DataFrame(self.model.predict(x_clean)) # type: ignore
-
-
-class CatBoostModel(AbstractModel):
-    """CatBoost Regressor."""
-    def __init__(self) -> None:
-        super().__init__()
-        self.model = MultiOutputRegressor(CatBoostRegressor(verbose=0, random_state=AbstractModel.seed)) # type: ignore
-
-    def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
-        x_clean = self._sanitize_feature_names(x)
-        self.model.fit(x_clean, y)
-
-    def _predict(self, x: pd.DataFrame) -> pd.DataFrame:
-        x_clean = self._sanitize_feature_names(x)
-        return pd.DataFrame(self.model.predict(x_clean)) # type: ignore
-
-# ======================================================
-#                Support Vector Models
-# ======================================================
-
-class SVRModel(AbstractModel):
-    """Support Vector Regressor."""
-    def __init__(self) -> None:
-        super().__init__()
-        self.model = MultiOutputRegressor(SVR())
-
-    def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
-        self.model.fit(x, y)
-
-    def _predict(self, x: pd.DataFrame) -> pd.DataFrame:
-        return pd.DataFrame(self.model.predict(x)) # type: ignore
-    
-# ======================================================
-#                Neural Network Models
-# ======================================================
-
-class MLPModel(AbstractModel):
-    """Multilayer Perceptron Regressor."""
-    def __init__(self) -> None:
-        super().__init__()
-        self.model = MultiOutputRegressor(MLPRegressor(random_state=AbstractModel.seed, 
-                                                       hidden_layer_sizes=(8, 6),
-                                                       activation='tanh',
-                                                       solver='adam',
-                                                       max_iter=1000))
-
-    def _fit(self, x: pd.DataFrame, y: pd.DataFrame) -> None:
-        self.model.fit(x, y)
-
-    def _predict(self, x: pd.DataFrame) -> pd.DataFrame:
-        return pd.DataFrame(self.model.predict(x)) # type: ignore
+    def _predict(
+        self,
+        x: pd.DataFrame,
+    ) -> np.ndarray:
+        return self.model.predict(x)
