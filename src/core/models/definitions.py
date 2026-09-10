@@ -1,4 +1,5 @@
 import time
+import warnings
 from typing import Optional
 
 import numpy as np
@@ -6,8 +7,13 @@ import pandas as pd
 
 from sklearn.ensemble import ExtraTreesRegressor, RandomForestRegressor
 from sklearn.linear_model import ElasticNet, Ridge
+from sklearn.exceptions import ConvergenceWarning
 from sklearn.svm import SVR
 from xgboost import XGBRegressor
+
+
+class ModelConvergenceError(RuntimeError):
+    """A model fit did not meet its solver's convergence criterion."""
 
 
 class AbstractModel:
@@ -32,7 +38,14 @@ class AbstractModel:
         self.target_columns = list(y.columns)
 
         start = time.perf_counter()
-        self._fit(x, y, sample_weight)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", ConvergenceWarning)
+            try:
+                self._fit(x, y, sample_weight)
+            except ConvergenceWarning as exc:
+                raise ModelConvergenceError(
+                    f"{self.name} did not converge: {exc}"
+                ) from exc
 
         return time.perf_counter() - start
 

@@ -134,13 +134,8 @@ def plot_outer_fold_mae(
     fig.update_layout(
         title=(
             f"{title}"
-            "<br>"
-            "<sup>"
-            "Each point is one outer GroupKFold result; "
-            "diamond = mean, error bar = ±1 SD"
-            "</sup>"
         ),
-        xaxis_title="MAE (lower is better)",
+        xaxis_title="MAE",
         yaxis={
             "title": "Model",
             "tickmode": "array",

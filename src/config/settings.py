@@ -290,7 +290,7 @@ class ValidationConfig:
             ),
             optuna_trials=config(
                 "OPTUNA_TRIALS",
-                default=30,
+                default=20,
                 cast=int,
             ),
             inference_k=config(

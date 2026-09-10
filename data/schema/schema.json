@@ -3,7 +3,6 @@
   "group": "Point",
   "bag": "CapturePointId",
   "instance_columns": [
-    "Audio_Name",
     "Segment_Name"
   ],
   "index_prefixes": [

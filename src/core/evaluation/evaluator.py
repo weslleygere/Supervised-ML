@@ -21,6 +21,7 @@ from src.core.models.factory import (
 )
 from src.core.evaluation.plots import save_evaluation_plots
 from src.core.models.search_space import suggest_parameters
+from src.core.models.definitions import ModelConvergenceError
 from src.core.processors.postsplit import PostSplitProcessor
 
 
@@ -39,6 +40,18 @@ class MIRMetrics:
     mae: float
     rmse: float
     r2: float
+
+
+@dataclass(frozen=True)
+class PreparedInnerFold:
+    """Training-only preprocessing reused across trials in one outer fold."""
+
+    validation_indices: np.ndarray
+    X_train: pd.DataFrame
+    y_train: pd.DataFrame
+    X_validation: pd.DataFrame
+    weights: np.ndarray
+    processor: PostSplitProcessor
 
 
 class ModelEvaluator:
@@ -262,18 +275,28 @@ class ModelEvaluator:
                 outer_fold=outer_fold,
             )
 
-            (
-                predictions,
-                fit_time,
-                prediction_time,
-            ) = self._fit_outer_model(
-                model_enum=model_enum,
-                params=best_params,
-                X_train=X_train,
-                y_train=y_train,
-                df_train=df_train,
-                X_test=X_test,
-            )
+            try:
+                (
+                    predictions,
+                    fit_time,
+                    prediction_time,
+                ) = self._fit_outer_model(
+                    model_enum=model_enum,
+                    params=best_params,
+                    X_train=X_train,
+                    y_train=y_train,
+                    df_train=df_train,
+                    X_test=X_test,
+                )
+            except ModelConvergenceError as exc:
+                message = (
+                    f"{model_enum.name} — outer fold {outer_fold}: "
+                    "the selected configuration did not converge on the "
+                    "outer training data. Evaluation stopped; this fold "
+                    "was not scored."
+                )
+                logger.error("%s %s", message, exc)
+                raise ModelConvergenceError(message) from exc
 
             metrics = self._instance_mir_metrics(
                 df=df_test,
@@ -348,59 +371,79 @@ class ModelEvaluator:
         df: pd.DataFrame,
         outer_fold: int,
     ) -> dict:
-        """
-        Optimize one model using only the training data of an outer fold.
+        """Select a converged configuration using inner OOF predictions.
 
-        Every Optuna trial is evaluated from complete inner OOF predictions.
+        Prepared folds are local to this search and released when it ends.
+        No preprocessing is fitted on inner validation or outer test data.
         """
-
-        sampler = optuna.samplers.TPESampler(
-            seed=self._optuna_seed(
-                model_enum,
-                outer_fold,
-            )
+        prepared_folds = self._prepare_inner_folds(
+            X=X,
+            y=y,
+            df=df,
+            outer_fold=outer_fold,
         )
 
+        sampler = optuna.samplers.TPESampler(
+            seed=self._optuna_seed(model_enum, outer_fold)
+        )
         study = optuna.create_study(
             direction="minimize",
             sampler=sampler,
         )
 
-        def objective(
-            trial: optuna.Trial,
-        ) -> float:
-            params = suggest_parameters(
-                trial,
-                model_enum,
-            )
+        def objective(trial: optuna.Trial) -> float:
+            params = suggest_parameters(trial, model_enum)
+            trial.set_user_attr("model_params", params)
 
-            trial.set_user_attr(
-                "model_params",
-                params,
-            )
-
-            return self._inner_cv_score(
-                model_enum=model_enum,
-                params=params,
-                X=X,
-                y=y,
-                df=df,
-                outer_fold=outer_fold,
-            )
+            try:
+                return self._inner_cv_score(
+                    model_enum=model_enum,
+                    params=params,
+                    prepared_folds=prepared_folds,
+                    df=df,
+                    outer_fold=outer_fold,
+                )
+            except ModelConvergenceError as exc:
+                trial.set_user_attr("convergence_failure", str(exc))
+                raise
 
         study.optimize(
             objective,
             n_trials=self.optuna_trials,
             n_jobs=1,
             show_progress_bar=False,
+            catch=(ModelConvergenceError,),
         )
 
-        best_params = (
-            study.best_trial.user_attrs[
-                "model_params"
-            ]
+        completed = sum(
+            trial.state == optuna.trial.TrialState.COMPLETE
+            for trial in study.trials
+        )
+        convergence_failures = sum(
+            "convergence_failure" in trial.user_attrs
+            for trial in study.trials
+        )
+        logger.info(
+            "%s — outer fold %d — trials: %d completed, "
+            "%d failed to converge, %d total",
+            model_enum.name,
+            outer_fold,
+            completed,
+            convergence_failures,
+            len(study.trials),
         )
 
+        if completed == 0:
+            message = (
+                f"{model_enum.name} — outer fold {outer_fold}: "
+                f"no completed trials out of {len(study.trials)} "
+                f"({convergence_failures} convergence failures). "
+                "No configuration can be selected; evaluation stopped."
+            )
+            logger.error(message)
+            raise RuntimeError(message)
+
+        best_params = study.best_trial.user_attrs["model_params"]
         logger.info(
             "%s — outer fold %d — "
             "best inner MIR-MAE: %.4f — params: %s",
@@ -409,125 +452,81 @@ class ModelEvaluator:
             study.best_value,
             best_params,
         )
-
         return best_params
 
-    def _inner_cv_score(
+    def _prepare_inner_folds(
         self,
-        model_enum: RegressionModels,
-        params: dict,
         X: pd.DataFrame,
         y: pd.DataFrame,
         df: pd.DataFrame,
         outer_fold: int,
-    ) -> float:
-        """
-        Evaluate one Optuna configuration using inner grouped CV.
-
-        Predictions from all inner validation folds are collected first.
-        The instance-MIR score is then calculated from these OOF predictions.
-        """
-
-        groups = df[
-            self.schema.group
-        ].to_numpy()
-
+    ) -> list[PreparedInnerFold]:
+        """Fit each inner fold's preprocessing and weights once per search."""
         inner_cv = GroupKFold(
             n_splits=self.inner_splits,
             shuffle=True,
-            random_state=self._inner_cv_seed(
-                outer_fold
-            ),
+            random_state=self._inner_cv_seed(outer_fold),
         )
-
-        inner_predictions = np.full(
-            len(df),
-            np.nan,
-            dtype=float,
-        )
-
-        for inner_train_idx, inner_val_idx in (
-            inner_cv.split(
-                X,
-                y,
-                groups=groups,
-            )
+        prepared_folds = []
+        for train_idx, validation_idx in inner_cv.split(
+            X, y, groups=df[self.schema.group].to_numpy()
         ):
-            X_train = X.iloc[
-                inner_train_idx
-            ]
-
-            X_val = X.iloc[
-                inner_val_idx
-            ]
-
-            y_train = y.iloc[
-                inner_train_idx
-            ]
-
-            df_train = df.iloc[
-                inner_train_idx
-            ]
-
             processor = PostSplitProcessor(
                 schema=self.schema,
                 feature_set=self.feature_set,
                 pca_components=self.pca_components,
             )
-
-            (
-                X_train_processed,
-                y_train_processed,
-            ) = processor.fit_transform(
-                X_train,
-                y_train,
+            X_train, y_train = processor.fit_transform(
+                X.iloc[train_idx], y.iloc[train_idx]
             )
-
-            X_val_processed = (
-                processor.transform(
-                    X_val
+            prepared_folds.append(
+                PreparedInnerFold(
+                    validation_indices=validation_idx,
+                    X_train=X_train,
+                    y_train=y_train,
+                    X_validation=processor.transform(X.iloc[validation_idx]),
+                    weights=self._hierarchical_weights(df.iloc[train_idx]),
+                    processor=processor,
                 )
             )
+        return prepared_folds
 
-            weights = self._hierarchical_weights(
-                df_train
-            )
+    def _inner_cv_score(
+        self,
+        model_enum: RegressionModels,
+        params: dict,
+        prepared_folds: list[PreparedInnerFold],
+        df: pd.DataFrame,
+        outer_fold: int,
+    ) -> float:
+        """Score one configuration using the cached, fold-specific inputs."""
+        inner_predictions = np.full(len(df), np.nan, dtype=float)
 
-            model = ModelFactory.create_model(
-                model_enum,
-                params=params,
-            )
-
-            model.fit(
-                X_train_processed,
-                y_train_processed,
-                sample_weight=weights,
-            )
-
-            y_pred, _ = model.predict(
-                X_val_processed
-            )
-
-            y_pred = (
-                processor.inverse_transform_target(
-                    y_pred
+        for inner_fold, fold in enumerate(prepared_folds, start=1):
+            model = ModelFactory.create_model(model_enum, params=params)
+            try:
+                model.fit(
+                    fold.X_train,
+                    fold.y_train,
+                    sample_weight=fold.weights,
                 )
-            )
+            except ModelConvergenceError as exc:
+                raise ModelConvergenceError(
+                    f"{model_enum.name} — outer fold {outer_fold}, "
+                    f"inner fold {inner_fold}: {exc}"
+                ) from exc
 
-            inner_predictions[
-                inner_val_idx
-            ] = y_pred[
-                self.schema.target
-            ].to_numpy()
+            y_pred, _ = model.predict(fold.X_validation)
+            y_pred = fold.processor.inverse_transform_target(y_pred)
+            inner_predictions[fold.validation_indices] = (
+                y_pred[self.schema.target].to_numpy()
+            )
 
         metrics = self._instance_mir_metrics(
             df=df,
             predictions=inner_predictions,
-            seed=self._inner_inference_seed(
-                outer_fold
-            ),
+            seed=self._inner_inference_seed(outer_fold),
         )
-
         return metrics.mae
 
     # =========================================================================
