@@ -16,10 +16,12 @@ class DataLoader:
     ----------
     data_path : str
         Path to the dataset file.
-
     schema_path : str
         Path to the JSON schema file.
     """
+
+    data_path: str
+    schema_path: str
 
     SUPPORTED_READERS: ClassVar[
         dict[str, Callable[[str], pd.DataFrame]]
@@ -30,32 +32,22 @@ class DataLoader:
         "json": pd.read_json,
     }
 
-    data_path: str
-    schema_path: str
-
     def load_data(self) -> pd.DataFrame:
-        """
-        Load the dataset based on its file extension.
+        extension = self.data_path.split(".")[-1].lower()
 
-        Returns
-        -------
-        pd.DataFrame
-            Loaded dataset.
-        """
-        extension = self.data_path.rsplit(".", 1)[-1].lower()
-        reader = self.SUPPORTED_READERS[extension]
+        if extension not in self.SUPPORTED_READERS:
+            raise ValueError(
+                f"Unsupported file type: {extension}"
+            )
 
         try:
-            df = reader(self.data_path)
-        except Exception as exc:
-            raise ValueError(
-                f"Failed to load file '{self.data_path}'."
-            ) from exc
-
-        if not isinstance(df, pd.DataFrame):
-            raise ValueError(
-                f"Expected DataFrame, got {type(df).__name__}."
+            df = self.SUPPORTED_READERS[extension](
+                self.data_path
             )
+        except Exception as e:
+            raise ValueError(
+                f"Failed to load file '{self.data_path}'"
+            ) from e
 
         if df.empty:
             raise ValueError(
@@ -65,14 +57,6 @@ class DataLoader:
         return df
 
     def load_schema(self) -> Schema:
-        """
-        Load the instance-MIR schema from JSON.
-
-        Returns
-        -------
-        Schema
-            Parsed dataset schema.
-        """
         try:
             with open(
                 self.schema_path,
@@ -81,17 +65,17 @@ class DataLoader:
             ) as file:
                 schema_dict = json.load(file)
 
-        except json.JSONDecodeError as exc:
+        except json.JSONDecodeError as e:
             raise ValueError(
                 f"Invalid JSON in schema file "
-                f"'{self.schema_path}'."
-            ) from exc
+                f"'{self.schema_path}'"
+            ) from e
 
-        except Exception as exc:
+        except Exception as e:
             raise ValueError(
                 f"Failed to load schema file "
-                f"'{self.schema_path}'."
-            ) from exc
+                f"'{self.schema_path}'"
+            ) from e
 
         if not isinstance(schema_dict, dict):
             raise ValueError(
@@ -102,7 +86,8 @@ class DataLoader:
             "target",
             "group",
             "bag",
-            "instance_columns",
+            "audio",
+            "datetime",
             "index_prefixes",
             "embedding",
         }
@@ -111,8 +96,10 @@ class DataLoader:
 
         if missing:
             raise ValueError(
-                "Schema file is missing required fields: "
-                f"{', '.join(sorted(missing))}"
+                "Schema is missing required fields: "
+                + ", ".join(sorted(missing))
             )
 
-        return Schema.from_dict(schema_dict)
+        return Schema.from_dict(
+            schema_dict
+        )

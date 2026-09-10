@@ -3,15 +3,17 @@ import optuna
 from .factory import RegressionModels
 
 
+# =============================================================================
+# HYPERPARAMETER SEARCH
+# =============================================================================
+
+
 def suggest_parameters(
     trial: optuna.Trial,
     model: RegressionModels,
 ) -> dict:
     """
     Suggest hyperparameters for one Optuna trial.
-
-    Search spaces are intentionally compact because optimization is performed
-    inside nested grouped cross-validation.
 
     Parameters
     ----------
@@ -60,14 +62,11 @@ def suggest_parameters(
                     0.05,
                     0.95,
                 ),
-                "selection": "random",
-                "precompute": True,
-                "max_iter": 20000,
-                "tol": 1e-4,
+                "max_iter": 10000,
             }
 
         # =====================================================================
-        # SVR - RBF
+        # SVR
         # =====================================================================
 
         case RegressionModels.SVR:
@@ -99,15 +98,22 @@ def suggest_parameters(
                 "n_estimators": 300,
                 "max_depth": trial.suggest_categorical(
                     "max_depth",
-                    [5, 10, 20, 30, None],
+                    [
+                        None,
+                        10,
+                        20,
+                        30,
+                    ],
                 ),
-                "min_samples_leaf": trial.suggest_categorical(
+                "min_samples_leaf": trial.suggest_int(
                     "min_samples_leaf",
-                    [1, 5, 10, 25, 50, 100],
+                    1,
+                    10,
                 ),
-                "max_features": trial.suggest_categorical(
+                "max_features": trial.suggest_float(
                     "max_features",
-                    [0.3, 0.5, 0.7, 1.0],
+                    0.3,
+                    1.0,
                 ),
             }
 
@@ -120,15 +126,22 @@ def suggest_parameters(
                 "n_estimators": 300,
                 "max_depth": trial.suggest_categorical(
                     "max_depth",
-                    [5, 10, 20, 30, None],
+                    [
+                        None,
+                        10,
+                        20,
+                        30,
+                    ],
                 ),
-                "min_samples_leaf": trial.suggest_categorical(
+                "min_samples_leaf": trial.suggest_int(
                     "min_samples_leaf",
-                    [1, 5, 10, 25, 50, 100],
+                    1,
+                    10,
                 ),
-                "max_features": trial.suggest_categorical(
+                "max_features": trial.suggest_float(
                     "max_features",
-                    [0.3, 0.5, 0.7, 1.0],
+                    0.3,
+                    1.0,
                 ),
             }
 
@@ -138,10 +151,7 @@ def suggest_parameters(
 
         case RegressionModels.XGBOOST:
             return {
-                "n_estimators": trial.suggest_categorical(
-                    "n_estimators",
-                    [300, 500, 1000],
-                ),
+                "n_estimators": 500,
                 "max_depth": trial.suggest_int(
                     "max_depth",
                     2,
@@ -156,7 +166,7 @@ def suggest_parameters(
                 "min_child_weight": trial.suggest_float(
                     "min_child_weight",
                     1.0,
-                    100.0,
+                    10.0,
                     log=True,
                 ),
                 "subsample": trial.suggest_float(
@@ -178,6 +188,10 @@ def suggest_parameters(
                 "objective": "reg:squarederror",
                 "tree_method": "hist",
             }
+
+        # =====================================================================
+        # UNSUPPORTED MODEL
+        # =====================================================================
 
         case _:
             raise ValueError(

@@ -1,7 +1,6 @@
 import logging
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
@@ -18,217 +17,129 @@ def plot_outer_fold_mae(
     outer_metrics: pd.DataFrame,
 ) -> go.Figure:
     """
-    Compare models using MAE from the outer grouped CV folds.
+    Plot outer-fold MAE for each model.
 
-    Each small point represents one outer fold. The diamond represents
-    the mean MAE across folds and the horizontal error bar represents
-    one standard deviation.
-
-    Lower MAE indicates better performance.
+    Individual points represent outer folds.
+    Diamonds represent mean MAE with ±1 standard deviation.
     """
-    stats = (
-        outer_metrics
-        .groupby("model", as_index=False)
-        .agg(
-            MAE_mean=("MAE", "mean"),
-            MAE_std=("MAE", "std"),
-        )
-        .sort_values("MAE_mean")
-        .reset_index(drop=True)
-    )
 
-    model_order = stats["model"].tolist()
+    order = (
+        outer_metrics
+        .groupby("model")["MAE"]
+        .mean()
+        .sort_values()
+        .index
+        .tolist()
+    )
 
     fig = go.Figure()
 
-    for model_position, model_name in enumerate(model_order):
-        fold_data = (
-            outer_metrics[
-                outer_metrics["model"] == model_name
-            ]
-            .sort_values("outer_fold")
-        )
-
-        n_folds = len(fold_data)
-
-        offsets = np.linspace(
-            -0.14,
-            0.14,
-            n_folds,
-        )
-
-        y_positions = (
-            model_position + offsets
-        )
+    for model in order:
+        data = outer_metrics[
+            outer_metrics["model"] == model
+        ]
 
         fig.add_trace(
             go.Scatter(
-                x=fold_data["MAE"],
-                y=y_positions,
+                x=[model] * len(data),
+                y=data["MAE"],
                 mode="markers",
-                name="Outer folds",
-                legendgroup="folds",
-                showlegend=model_position == 0,
-                customdata=fold_data[
-                    ["outer_fold"]
-                ].to_numpy(),
+                name=model,
+                showlegend=False,
+                marker={
+                    "size": 8,
+                    "opacity": 0.65,
+                },
                 hovertemplate=(
-                    "Model: "
-                    + model_name
-                    + "<br>"
-                    + "Outer fold: %{customdata[0]}"
-                    + "<br>"
-                    + "MAE: %{x:.4f}"
-                    + "<extra></extra>"
+                    f"{model}"
+                    "<br>Outer fold: %{customdata}"
+                    "<br>MAE: %{y:.3f}"
+                    "<extra></extra>"
                 ),
+                customdata=data[
+                    "outer_fold"
+                ],
             )
         )
 
-        model_stats = stats[
-            stats["model"] == model_name
-        ].iloc[0]
-
         fig.add_trace(
             go.Scatter(
-                x=[model_stats["MAE_mean"]],
-                y=[model_position],
+                x=[model],
+                y=[data["MAE"].mean()],
                 mode="markers",
-                name="Mean ± SD",
-                legendgroup="mean",
-                showlegend=model_position == 0,
+                showlegend=False,
                 marker={
-                    "symbol": "diamond",
                     "size": 12,
+                    "symbol": "diamond",
                 },
-                error_x={
+                error_y={
                     "type": "data",
                     "array": [
-                        model_stats["MAE_std"]
+                        data["MAE"].std()
                     ],
                     "visible": True,
                 },
                 hovertemplate=(
-                    "Model: "
-                    + model_name
-                    + "<br>"
-                    + "Mean MAE: %{x:.4f}"
-                    + "<br>"
-                    + "SD: "
-                    + f"{model_stats['MAE_std']:.4f}"
-                    + "<extra></extra>"
+                    f"{model}"
+                    "<br>Mean MAE: %{y:.3f}"
+                    "<extra></extra>"
                 ),
             )
         )
 
-    feature_set = (
-        outer_metrics["feature_set"].iloc[0]
-        if "feature_set" in outer_metrics.columns
-        else ""
-    )
-
-    title = "Outer-fold MAE"
-
-    if feature_set:
-        title += f" — {feature_set}"
-
     fig.update_layout(
         title=(
-            f"{title}"
+            "Model comparison"
+            "<br>"
+            "<sup>"
+            "Outer GroupKFold performance "
+            "on unseen Points"
+            "</sup>"
         ),
-        xaxis_title="MAE",
-        yaxis={
-            "title": "Model",
-            "tickmode": "array",
-            "tickvals": list(
-                range(len(model_order))
-            ),
-            "ticktext": model_order,
-            "autorange": "reversed",
-        },
+        xaxis_title="Model",
+        yaxis_title="MAE (HFI units)",
         template="plotly_white",
-        hovermode="closest",
-        height=max(
-            450,
-            90 * len(model_order),
-        ),
+        height=550,
     )
 
     return fig
 
 
 # =============================================================================
-# WINNING MODEL DIAGNOSTIC
+# OBSERVED VS PREDICTED
 # =============================================================================
 
 
 def plot_oof_observed_vs_predicted(
+    summary: pd.DataFrame,
     oof_predictions: pd.DataFrame,
-    model_name: str,
-    target_column: str,
-    group_column: str,
-    bag_column: str,
-    inference_k: int,
-    inference_repeats: int,
-    seed: int,
 ) -> go.Figure:
     """
-    Plot observed versus OOF-predicted HFI for the selected model.
+    Plot pooled outer OOF predictions for the best model.
 
-    Individual 1-minute OOF predictions are converted into CapturePointId-level
-    predictions using the same fixed-k inference strategy used during model
-    evaluation.
-
-    For each CapturePointId:
-    - k recordings are randomly selected without replacement;
-    - their predictions are averaged;
-    - this is repeated inference_repeats times.
-
-    The plotted prediction is the mean across repetitions and the vertical
-    error bar is the standard deviation across repetitions.
+    The winner is selected using the lowest OOF MAE.
     """
-    model_predictions = (
-        oof_predictions[
-            oof_predictions["model"] == model_name
-        ]
-        .copy()
+
+    winner = summary.iloc[0]
+
+    model_name = winner["model"]
+
+    data = oof_predictions[
+        oof_predictions["model"] == model_name
+    ].copy()
+
+    observed = data["meanHFI"]
+    predicted = data["prediction"]
+
+    lower = min(
+        observed.min(),
+        predicted.min(),
     )
 
-    capture_summary = _capture_prediction_summary(
-        predictions=model_predictions,
-        target_column=target_column,
-        group_column=group_column,
-        bag_column=bag_column,
-        inference_k=inference_k,
-        inference_repeats=inference_repeats,
-        seed=seed,
+    upper = max(
+        observed.max(),
+        predicted.max(),
     )
-
-    observed = capture_summary["observed"]
-    predicted = capture_summary["predicted"]
-
-    axis_min = float(
-        min(
-            observed.min(),
-            predicted.min(),
-        )
-    )
-
-    axis_max = float(
-        max(
-            observed.max(),
-            predicted.max(),
-        )
-    )
-
-    margin = 0.05 * (
-        axis_max - axis_min
-    )
-
-    if margin == 0:
-        margin = 0.1
-
-    axis_min -= margin
-    axis_max += margin
 
     fig = go.Figure()
 
@@ -237,29 +148,24 @@ def plot_oof_observed_vs_predicted(
             x=observed,
             y=predicted,
             mode="markers",
-            error_y={
-                "type": "data",
-                "array": capture_summary[
-                    "prediction_sd"
-                ],
-                "visible": True,
+            marker={
+                "size": 9,
+                "opacity": 0.75,
             },
-            customdata=capture_summary[
+            customdata=data[
                 [
-                    group_column,
-                    bag_column,
+                    "Point",
+                    "CapturePointId",
                 ]
-            ].to_numpy(),
+            ],
             hovertemplate=(
-                f"{group_column}: "
-                "%{customdata[0]}"
+                "Point: %{customdata[0]}"
                 "<br>"
-                f"{bag_column}: "
-                "%{customdata[1]}"
+                "CapturePointId: %{customdata[1]}"
                 "<br>"
-                "Observed HFI: %{x:.4f}"
+                "Observed HFI: %{x:.3f}"
                 "<br>"
-                "Predicted HFI: %{y:.4f}"
+                "Predicted HFI: %{y:.3f}"
                 "<extra></extra>"
             ),
             name="CapturePointId",
@@ -268,183 +174,48 @@ def plot_oof_observed_vs_predicted(
 
     fig.add_trace(
         go.Scatter(
-            x=[
-                axis_min,
-                axis_max,
-            ],
-            y=[
-                axis_min,
-                axis_max,
-            ],
+            x=[lower, upper],
+            y=[lower, upper],
             mode="lines",
-            name="Ideal prediction",
             line={
                 "dash": "dash",
             },
-            hoverinfo="skip",
+            name="Perfect prediction",
         )
     )
 
     fig.update_layout(
         title=(
-            f"{model_name} — observed vs OOF-predicted HFI"
+            f"{model_name} — observed vs predicted HFI"
             "<br>"
             "<sup>"
-            f"k={inference_k} one-minute recordings per CapturePointId; "
-            f"{inference_repeats} repeated samples"
+            f"OOF MAE = {winner['OOF_MAE']:.3f} | "
+            f"RMSE = {winner['OOF_RMSE']:.3f} | "
+            f"R² = {winner['OOF_R2']:.3f}"
             "</sup>"
         ),
-        xaxis={
-            "title": "Observed HFI",
-            "range": [
-                axis_min,
-                axis_max,
-            ],
-        },
-        yaxis={
-            "title": "OOF-predicted HFI",
-            "range": [
-                axis_min,
-                axis_max,
-            ],
-            "scaleanchor": "x",
-            "scaleratio": 1,
-        },
+        xaxis_title="Observed HFI",
+        yaxis_title="Predicted HFI",
         template="plotly_white",
-        hovermode="closest",
-        height=650,
+        height=600,
         width=700,
+    )
+
+    fig.update_xaxes(
+        range=[lower, upper]
+    )
+
+    fig.update_yaxes(
+        range=[lower, upper],
+        scaleanchor="x",
+        scaleratio=1,
     )
 
     return fig
 
 
 # =============================================================================
-# INSTANCE-MIR AGGREGATION FOR DIAGNOSTIC PLOT
-# =============================================================================
-
-
-def _capture_prediction_summary(
-    predictions: pd.DataFrame,
-    target_column: str,
-    group_column: str,
-    bag_column: str,
-    inference_k: int,
-    inference_repeats: int,
-    seed: int,
-) -> pd.DataFrame:
-    """
-    Summarize fixed-k OOF predictions at CapturePointId level.
-
-    Returns one row per CapturePointId containing:
-    - observed HFI;
-    - mean predicted HFI across repeated fixed-k samples;
-    - standard deviation of predicted HFI across repetitions.
-    """
-    capture_predictions: dict[
-        tuple[object, object],
-        list[float],
-    ] = {}
-
-    capture_observed: dict[
-        tuple[object, object],
-        float,
-    ] = {}
-
-    grouped = list(
-        predictions.groupby(
-            [
-                group_column,
-                bag_column,
-            ],
-            sort=False,
-        )
-    )
-
-    for repeat in range(
-        inference_repeats
-    ):
-        rng = np.random.default_rng(
-            seed + repeat
-        )
-
-        for (
-            point,
-            capture,
-        ), capture_df in grouped:
-
-            selected_positions = rng.choice(
-                len(capture_df),
-                size=inference_k,
-                replace=False,
-            )
-
-            selected = capture_df.iloc[
-                selected_positions
-            ]
-
-            key = (
-                point,
-                capture,
-            )
-
-            capture_predictions.setdefault(
-                key,
-                [],
-            ).append(
-                float(
-                    selected[
-                        "prediction"
-                    ].mean()
-                )
-            )
-
-            capture_observed[key] = float(
-                selected[
-                    target_column
-                ].mean()
-            )
-
-    rows = []
-
-    for (
-        point,
-        capture,
-    ), values in capture_predictions.items():
-
-        rows.append(
-            {
-                group_column: point,
-                bag_column: capture,
-                "observed": (
-                    capture_observed[
-                        (
-                            point,
-                            capture,
-                        )
-                    ]
-                ),
-                "predicted": float(
-                    np.mean(values)
-                ),
-                "prediction_sd": (
-                    float(
-                        np.std(
-                            values,
-                            ddof=1,
-                        )
-                    )
-                    if len(values) > 1
-                    else 0.0
-                ),
-            }
-        )
-
-    return pd.DataFrame(rows)
-
-
-# =============================================================================
-# SAVE EXPERIMENT FIGURES
+# SAVE FIGURES
 # =============================================================================
 
 
@@ -453,16 +224,11 @@ def save_evaluation_plots(
     summary: pd.DataFrame,
     oof_predictions: pd.DataFrame,
     output_dir: str | Path,
-    target_column: str,
-    group_column: str,
-    bag_column: str,
-    inference_k: int,
-    inference_repeats: int,
-    seed: int,
 ) -> None:
     """
-    Generate and save the two figures used in the first instance-MIR experiment.
+    Create and save the main evaluation figures.
     """
+
     figures_dir = (
         Path(output_dir)
         / "figures"
@@ -473,75 +239,54 @@ def save_evaluation_plots(
         exist_ok=True,
     )
 
-    comparison_fig = (
-        plot_outer_fold_mae(
-            outer_metrics
+    figures = {
+        "outer_fold_mae": (
+            plot_outer_fold_mae(
+                outer_metrics
+            )
+        ),
+        "winner_observed_vs_predicted": (
+            plot_oof_observed_vs_predicted(
+                summary,
+                oof_predictions,
+            )
+        ),
+    }
+
+    for name, fig in figures.items():
+        _save_figure(
+            fig,
+            figures_dir / name,
         )
-    )
 
-    winner = (
-        summary
-        .sort_values(
-            "OOF_MAE"
-        )
-        .iloc[0]["model"]
-    )
 
-    diagnostic_fig = (
-        plot_oof_observed_vs_predicted(
-            oof_predictions=oof_predictions,
-            model_name=winner,
-            target_column=target_column,
-            group_column=group_column,
-            bag_column=bag_column,
-            inference_k=inference_k,
-            inference_repeats=inference_repeats,
-            seed=seed,
-        )
-    )
-
-    _save_figure(
-        comparison_fig,
-        figures_dir
-        / "outer_fold_mae",
-    )
-
-    _save_figure(
-        diagnostic_fig,
-        figures_dir
-        / "winner_observed_vs_predicted",
-    )
-
-    logger.info(
-        "Evaluation figures saved to %s",
-        figures_dir,
-    )
+# =============================================================================
+# FIGURE OUTPUT
+# =============================================================================
 
 
 def _save_figure(
-    figure: go.Figure,
-    output_path: Path,
+    fig: go.Figure,
+    path: Path,
 ) -> None:
     """
     Save a Plotly figure as HTML and, when available, PNG.
     """
-    figure.write_html(
-        output_path.with_suffix(
-            ".html"
-        )
+
+    fig.write_html(
+        path.with_suffix(".html"),
+        include_plotlyjs="directory",
     )
 
     try:
-        figure.write_image(
-            output_path.with_suffix(
-                ".png"
-            ),
+        fig.write_image(
+            path.with_suffix(".png"),
             scale=2,
         )
 
     except Exception as exc:
         logger.warning(
-            "Could not save PNG for %s: %s",
-            output_path.name,
+            "Could not save PNG '%s': %s",
+            path,
             exc,
         )

@@ -7,9 +7,16 @@ from decouple import config
 from src.core.models.factory import RegressionModels
 
 
-def _optional_int(value: str) -> int | None:
-    value = value.strip().lower()
-    return None if value in {"", "none"} else int(value)
+def _optional_int(value: str | None) -> int | None:
+    if value is None:
+        return None
+
+    value = str(value).strip()
+
+    if not value or value.lower() == "none":
+        return None
+
+    return int(value)
 
 
 @dataclass
@@ -19,7 +26,9 @@ class DataConfig:
     output_dir_base: str
     output_dir: str = field(init=False)
 
-    DATA_EXTENSIONS = frozenset({"csv", "xlsx", "parquet", "json"})
+    DATA_EXTENSIONS = frozenset(
+        {"csv", "xlsx", "parquet", "json"}
+    )
 
     def __post_init__(self) -> None:
         self._validate_dataset_file()
@@ -31,7 +40,10 @@ class DataConfig:
     def from_env(cls) -> "DataConfig":
         return cls(
             data_path=str(
-                config("DATA_PATH", default="data/raw/data.csv")
+                config(
+                    "DATA_PATH",
+                    default="data/raw/data.csv",
+                )
             ),
             schema_path=str(
                 config(
@@ -40,7 +52,10 @@ class DataConfig:
                 )
             ),
             output_dir_base=str(
-                config("OUTPUT_DIR", default="output")
+                config(
+                    "OUTPUT_DIR",
+                    default="output",
+                )
             ),
         )
 
@@ -50,10 +65,16 @@ class DataConfig:
                 f"Dataset file not found: {self.data_path}"
             )
 
-        extension = self.data_path.rsplit(".", 1)[-1].lower()
+        extension = (
+            self.data_path
+            .rsplit(".", 1)[-1]
+            .lower()
+        )
 
         if extension not in self.DATA_EXTENSIONS:
-            allowed = ", ".join(sorted(self.DATA_EXTENSIONS))
+            allowed = ", ".join(
+                sorted(self.DATA_EXTENSIONS)
+            )
 
             raise ValueError(
                 f"Unsupported dataset extension '.{extension}'. "
@@ -68,7 +89,8 @@ class DataConfig:
 
         if not self.schema_path.lower().endswith(".json"):
             raise ValueError(
-                f"Schema file must be a JSON file: {self.schema_path}"
+                f"Schema file must be a JSON file: "
+                f"{self.schema_path}"
             )
 
     def _validate_output_base(self) -> None:
@@ -115,12 +137,13 @@ class ModelConfig:
 
     def __post_init__(self) -> None:
         self.models = self._parse_models()
-
         self._validate_random_state()
         self._validate_feature_set()
         self._validate_pca_components()
 
-        from src.core.models.definitions import AbstractModel
+        from src.core.models.definitions import (
+            AbstractModel,
+        )
 
         AbstractModel.seed = self.random_state
 
@@ -128,7 +151,10 @@ class ModelConfig:
     def from_env(cls) -> "ModelConfig":
         return cls(
             models_config=str(
-                config("MODELS", default="all")
+                config(
+                    "MODELS",
+                    default="all",
+                )
             ),
             random_state=config(
                 "RANDOM_STATE",
@@ -145,7 +171,7 @@ class ModelConfig:
                 str(
                     config(
                         "PCA_COMPONENTS",
-                        default="none",
+                        default="50",
                     )
                 )
             ),
@@ -154,6 +180,7 @@ class ModelConfig:
     def _parse_models(
         self,
     ) -> list[RegressionModels]:
+
         value = self.models_config.strip()
 
         if value.lower() == "all":
@@ -188,8 +215,8 @@ class ModelConfig:
 
         if self.feature_set not in valid:
             raise ValueError(
-                f"FEATURE_SET must be one of {valid}, "
-                f"got: {self.feature_set}"
+                "FEATURE_SET must be one of: "
+                "indices, embeddings, both."
             )
 
     def _validate_pca_components(self) -> None:
@@ -198,14 +225,14 @@ class ModelConfig:
             and self.pca_components <= 0
         ):
             raise ValueError(
-                "PCA_COMPONENTS must be a positive "
-                "integer or 'none'."
+                "PCA_COMPONENTS must be > 0 or None."
             )
 
     @staticmethod
     def _to_enum(
         name: str,
     ) -> RegressionModels:
+
         try:
             return RegressionModels[name]
 
@@ -243,11 +270,7 @@ class ModelConfig:
 class ValidationConfig:
     outer_splits: int
     inner_splits: int
-
     optuna_trials: int
-
-    inference_k: int
-    inference_repeats: int
 
     def __post_init__(self) -> None:
         if self.outer_splits < 2:
@@ -265,18 +288,11 @@ class ValidationConfig:
                 "OPTUNA_TRIALS must be >= 1."
             )
 
-        if self.inference_k < 1:
-            raise ValueError(
-                "INFERENCE_K must be >= 1."
-            )
-
-        if self.inference_repeats < 1:
-            raise ValueError(
-                "INFERENCE_REPEATS must be >= 1."
-            )
-
     @classmethod
-    def from_env(cls) -> "ValidationConfig":
+    def from_env(
+        cls,
+    ) -> "ValidationConfig":
+
         return cls(
             outer_splits=config(
                 "OUTER_SPLITS",
@@ -290,16 +306,6 @@ class ValidationConfig:
             ),
             optuna_trials=config(
                 "OPTUNA_TRIALS",
-                default=20,
-                cast=int,
-            ),
-            inference_k=config(
-                "INFERENCE_K",
-                default=10,
-                cast=int,
-            ),
-            inference_repeats=config(
-                "INFERENCE_REPEATS",
                 default=20,
                 cast=int,
             ),
@@ -325,7 +331,10 @@ class LoggingConfig:
             )
 
     @classmethod
-    def from_env(cls) -> "LoggingConfig":
+    def from_env(
+        cls,
+    ) -> "LoggingConfig":
+
         return cls(
             log_level=str(
                 config(
@@ -349,7 +358,10 @@ class Settings:
     logging: LoggingConfig
 
     @classmethod
-    def from_env(cls) -> "Settings":
+    def from_env(
+        cls,
+    ) -> "Settings":
+
         return cls(
             data=DataConfig.from_env(),
             model=ModelConfig.from_env(),

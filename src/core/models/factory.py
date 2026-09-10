@@ -11,9 +11,14 @@ from .definitions import (
 )
 
 
+# =============================================================================
+# REGRESSION MODELS
+# =============================================================================
+
+
 class RegressionModels(IntEnum):
     """
-    Regression models used in the first instance-MIR experiment.
+    Regression models evaluated in the HFI prediction experiment.
     """
 
     RIDGE_REGRESSION = auto()
@@ -22,6 +27,11 @@ class RegressionModels(IntEnum):
     RANDOM_FOREST = auto()
     EXTRA_TREES = auto()
     XGBOOST = auto()
+
+
+# =============================================================================
+# MODEL FACTORY
+# =============================================================================
 
 
 class ModelFactory:
@@ -41,36 +51,50 @@ class ModelFactory:
         ----------
         model : RegressionModels
             Model to instantiate.
-
         params : dict | None
-            Hyperparameters selected for the model. If None, the model
-            is created using its default parameters.
+            Hyperparameters selected for the model.
+            If None, default parameters are used.
 
         Returns
         -------
         AbstractModel
             Instantiated regression model.
         """
+
         params = params or {}
 
         match model:
             case RegressionModels.RIDGE_REGRESSION:
-                return RidgeRegressionModel(**params)
+                return RidgeRegressionModel(
+                    **params
+                )
 
             case RegressionModels.ELASTIC_NET:
-                return ElasticNetModel(**params)
+                return ElasticNetModel(
+                    **params
+                )
 
             case RegressionModels.SVR:
-                return SVRModel(**params)
+                return SVRModel(
+                    **params
+                )
 
             case RegressionModels.RANDOM_FOREST:
-                return RandomForestModel(**params)
+                return RandomForestModel(
+                    **params
+                )
 
             case RegressionModels.EXTRA_TREES:
-                return ExtraTreesModel(**params)
+                return ExtraTreesModel(
+                    **params
+                )
 
             case RegressionModels.XGBOOST:
-                return XGBoostModel(**params)
+                return XGBoostModel(
+                    **params
+                )
 
             case _:
-                raise ValueError(f"Unsupported model: {model}")
+                raise ValueError(
+                    f"Unsupported model: {model}"
+                )

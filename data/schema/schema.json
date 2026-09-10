@@ -2,9 +2,8 @@
   "target": "meanHFI",
   "group": "Point",
   "bag": "CapturePointId",
-  "instance_columns": [
-    "Segment_Name"
-  ],
+  "audio": "Audio_Name",
+  "datetime": "AudioDate",
   "index_prefixes": [
     "s_",
     "t_"

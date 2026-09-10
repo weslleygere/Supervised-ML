@@ -9,33 +9,33 @@ from .core.processors.presplit import PreSplitProcessor
 logger = logging.getLogger(__name__)
 
 
+# =============================================================================
+# PIPELINE
+# =============================================================================
+
+
 class Pipeline:
     """
-    Orchestrate the instance-MIR machine learning experiment.
+    Orchestrate the end-to-end supervised machine learning pipeline.
 
-    Parameters
-    ----------
-    settings : Settings
-        Experiment configuration.
+    Steps
+    -----
+    1. Load raw data and schema.
+    2. Build one hierarchical acoustic signature per CapturePointId.
+    3. Evaluate the selected regression models using nested GroupKFold.
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+    ) -> None:
         self.settings = settings
 
     def run(self) -> None:
-        """
-        Execute the complete experiment.
 
-        Steps
-        -----
-        1. Load dataset and schema.
-        2. Select the columns required by the experiment.
-        3. Run nested grouped instance-MIR evaluation.
-        """
-
-        # ---------------------------------------------------------------------
-        # 1. Load data and schema
-        # ---------------------------------------------------------------------
+        # =====================================================================
+        # DATA LOADING
+        # =====================================================================
 
         loader = DataLoader(
             data_path=self.settings.data.data_path,
@@ -50,12 +50,12 @@ class Pipeline:
             df_raw.shape,
         )
 
-        # ---------------------------------------------------------------------
-        # 2. Pre-split processing
-        # ---------------------------------------------------------------------
+        # =====================================================================
+        # HIERARCHICAL AGGREGATION
+        # =====================================================================
 
         pre_split_processor = PreSplitProcessor(
-            schema=schema,
+            schema=schema
         )
 
         df_processed = pre_split_processor.process(
@@ -63,13 +63,25 @@ class Pipeline:
         )
 
         logger.info(
-            "Data prepared successfully with shape %s",
+            "Hierarchical acoustic signatures created "
+            "successfully with shape %s",
             df_processed.shape,
         )
 
-        # ---------------------------------------------------------------------
-        # 3. Nested instance-MIR evaluation
-        # ---------------------------------------------------------------------
+        logger.info(
+            "Processed dataset contains %d CapturePointIds "
+            "across %d Points",
+            df_processed[
+                schema.bag
+            ].nunique(),
+            df_processed[
+                schema.group
+            ].nunique(),
+        )
+
+        # =====================================================================
+        # MODEL EVALUATION
+        # =====================================================================
 
         evaluator = ModelEvaluator(
             schema=schema,
@@ -81,14 +93,8 @@ class Pipeline:
             outer_splits=self.settings.validation.outer_splits,
             inner_splits=self.settings.validation.inner_splits,
             optuna_trials=self.settings.validation.optuna_trials,
-            inference_k=self.settings.validation.inference_k,
-            inference_repeats=self.settings.validation.inference_repeats,
         )
 
         evaluator.evaluate(
             df_processed
-        )
-
-        logger.info(
-            "Instance-MIR experiment completed successfully."
         )

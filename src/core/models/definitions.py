@@ -1,24 +1,40 @@
 import time
-import warnings
 from typing import Optional
 
 import numpy as np
 import pandas as pd
 
-from sklearn.ensemble import ExtraTreesRegressor, RandomForestRegressor
-from sklearn.linear_model import ElasticNet, Ridge
-from sklearn.exceptions import ConvergenceWarning
+from sklearn.ensemble import (
+    ExtraTreesRegressor,
+    RandomForestRegressor,
+)
+from sklearn.linear_model import (
+    ElasticNet,
+    Ridge,
+)
 from sklearn.svm import SVR
 from xgboost import XGBRegressor
 
 
+# =============================================================================
+# EXCEPTIONS
+# =============================================================================
+
+
 class ModelConvergenceError(RuntimeError):
-    """A model fit did not meet its solver's convergence criterion."""
+    """
+    Raised when a regression model does not converge.
+    """
+
+
+# =============================================================================
+# BASE MODEL
+# =============================================================================
 
 
 class AbstractModel:
     """
-    Base class for the regression models used in the instance-MIR experiment.
+    Base class for the regression models used in the HFI experiment.
     """
 
     seed: Optional[int] = None
@@ -35,19 +51,23 @@ class AbstractModel:
         """
         Fit the model and return training time.
         """
-        self.target_columns = list(y.columns)
+
+        self.target_columns = list(
+            y.columns
+        )
 
         start = time.perf_counter()
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", ConvergenceWarning)
-            try:
-                self._fit(x, y, sample_weight)
-            except ConvergenceWarning as exc:
-                raise ModelConvergenceError(
-                    f"{self.name} did not converge: {exc}"
-                ) from exc
 
-        return time.perf_counter() - start
+        self._fit(
+            x,
+            y,
+            sample_weight,
+        )
+
+        return (
+            time.perf_counter()
+            - start
+        )
 
     def predict(
         self,
@@ -56,11 +76,24 @@ class AbstractModel:
         """
         Generate predictions and return prediction time.
         """
-        start = time.perf_counter()
-        predictions = self._predict(x)
-        elapsed = time.perf_counter() - start
 
-        predictions = np.asarray(predictions).reshape(-1, 1)
+        start = time.perf_counter()
+
+        predictions = self._predict(
+            x
+        )
+
+        elapsed = (
+            time.perf_counter()
+            - start
+        )
+
+        predictions = (
+            np.asarray(
+                predictions
+            )
+            .reshape(-1, 1)
+        )
 
         return (
             pd.DataFrame(
@@ -89,8 +122,14 @@ class AbstractModel:
     def _target_values(
         y: pd.DataFrame,
     ) -> np.ndarray:
-        """Convert the single-target dataframe to a 1D array."""
-        return y.iloc[:, 0].to_numpy()
+        """
+        Convert the single-target dataframe to a 1D array.
+        """
+
+        return (
+            y.iloc[:, 0]
+            .to_numpy()
+        )
 
     @property
     def name(self) -> str:
@@ -107,12 +146,22 @@ class AbstractModel:
 # =============================================================================
 
 
-class RidgeRegressionModel(AbstractModel):
-    """Ridge Regression."""
+class RidgeRegressionModel(
+    AbstractModel
+):
+    """
+    Ridge Regression.
+    """
 
-    def __init__(self, **params) -> None:
+    def __init__(
+        self,
+        **params,
+    ) -> None:
         super().__init__()
-        self.model = Ridge(**params)
+
+        self.model = Ridge(
+            **params
+        )
 
     def _fit(
         self,
@@ -120,6 +169,7 @@ class RidgeRegressionModel(AbstractModel):
         y: pd.DataFrame,
         sample_weight: np.ndarray | None = None,
     ) -> None:
+
         self.model.fit(
             x,
             self._target_values(y),
@@ -130,18 +180,33 @@ class RidgeRegressionModel(AbstractModel):
         self,
         x: pd.DataFrame,
     ) -> np.ndarray:
-        return self.model.predict(x)
+
+        return self.model.predict(
+            x
+        )
 
 
-class ElasticNetModel(AbstractModel):
-    """Elastic Net Regression."""
+class ElasticNetModel(
+    AbstractModel
+):
+    """
+    Elastic Net Regression.
+    """
 
-    def __init__(self, **params) -> None:
+    def __init__(
+        self,
+        **params,
+    ) -> None:
         super().__init__()
 
-        params.setdefault("random_state", AbstractModel.seed)
+        params.setdefault(
+            "random_state",
+            AbstractModel.seed,
+        )
 
-        self.model = ElasticNet(**params)
+        self.model = ElasticNet(
+            **params
+        )
 
     def _fit(
         self,
@@ -149,6 +214,7 @@ class ElasticNetModel(AbstractModel):
         y: pd.DataFrame,
         sample_weight: np.ndarray | None = None,
     ) -> None:
+
         self.model.fit(
             x,
             self._target_values(y),
@@ -159,7 +225,10 @@ class ElasticNetModel(AbstractModel):
         self,
         x: pd.DataFrame,
     ) -> np.ndarray:
-        return self.model.predict(x)
+
+        return self.model.predict(
+            x
+        )
 
 
 # =============================================================================
@@ -167,15 +236,27 @@ class ElasticNetModel(AbstractModel):
 # =============================================================================
 
 
-class SVRModel(AbstractModel):
-    """Support Vector Regression."""
+class SVRModel(
+    AbstractModel
+):
+    """
+    Support Vector Regression with RBF kernel.
+    """
 
-    def __init__(self, **params) -> None:
+    def __init__(
+        self,
+        **params,
+    ) -> None:
         super().__init__()
 
-        params.setdefault("kernel", "rbf")
+        params.setdefault(
+            "kernel",
+            "rbf",
+        )
 
-        self.model = SVR(**params)
+        self.model = SVR(
+            **params
+        )
 
     def _fit(
         self,
@@ -183,17 +264,27 @@ class SVRModel(AbstractModel):
         y: pd.DataFrame,
         sample_weight: np.ndarray | None = None,
     ) -> None:
+
         self.model.fit(
             x,
             self._target_values(y),
             sample_weight=sample_weight,
         )
 
+        if self.model.fit_status_ != 0:
+            raise ModelConvergenceError(
+                "SVR reached the iteration limit "
+                "before convergence."
+            )
+
     def _predict(
         self,
         x: pd.DataFrame,
     ) -> np.ndarray:
-        return self.model.predict(x)
+
+        return self.model.predict(
+            x
+        )
 
 
 # =============================================================================
@@ -201,16 +292,34 @@ class SVRModel(AbstractModel):
 # =============================================================================
 
 
-class RandomForestModel(AbstractModel):
-    """Random Forest Regressor."""
+class RandomForestModel(
+    AbstractModel
+):
+    """
+    Random Forest Regressor.
+    """
 
-    def __init__(self, **params) -> None:
+    def __init__(
+        self,
+        **params,
+    ) -> None:
         super().__init__()
 
-        params.setdefault("random_state", AbstractModel.seed)
-        params.setdefault("n_jobs", -1)
+        params.setdefault(
+            "random_state",
+            AbstractModel.seed,
+        )
 
-        self.model = RandomForestRegressor(**params)
+        params.setdefault(
+            "n_jobs",
+            -1,
+        )
+
+        self.model = (
+            RandomForestRegressor(
+                **params
+            )
+        )
 
     def _fit(
         self,
@@ -218,6 +327,7 @@ class RandomForestModel(AbstractModel):
         y: pd.DataFrame,
         sample_weight: np.ndarray | None = None,
     ) -> None:
+
         self.model.fit(
             x,
             self._target_values(y),
@@ -228,19 +338,40 @@ class RandomForestModel(AbstractModel):
         self,
         x: pd.DataFrame,
     ) -> np.ndarray:
-        return self.model.predict(x)
+
+        return self.model.predict(
+            x
+        )
 
 
-class ExtraTreesModel(AbstractModel):
-    """Extra Trees Regressor."""
+class ExtraTreesModel(
+    AbstractModel
+):
+    """
+    Extra Trees Regressor.
+    """
 
-    def __init__(self, **params) -> None:
+    def __init__(
+        self,
+        **params,
+    ) -> None:
         super().__init__()
 
-        params.setdefault("random_state", AbstractModel.seed)
-        params.setdefault("n_jobs", -1)
+        params.setdefault(
+            "random_state",
+            AbstractModel.seed,
+        )
 
-        self.model = ExtraTreesRegressor(**params)
+        params.setdefault(
+            "n_jobs",
+            -1,
+        )
+
+        self.model = (
+            ExtraTreesRegressor(
+                **params
+            )
+        )
 
     def _fit(
         self,
@@ -248,6 +379,7 @@ class ExtraTreesModel(AbstractModel):
         y: pd.DataFrame,
         sample_weight: np.ndarray | None = None,
     ) -> None:
+
         self.model.fit(
             x,
             self._target_values(y),
@@ -258,19 +390,43 @@ class ExtraTreesModel(AbstractModel):
         self,
         x: pd.DataFrame,
     ) -> np.ndarray:
-        return self.model.predict(x)
+
+        return self.model.predict(
+            x
+        )
 
 
-class XGBoostModel(AbstractModel):
-    """XGBoost Regressor."""
+# =============================================================================
+# GRADIENT BOOSTING
+# =============================================================================
 
-    def __init__(self, **params) -> None:
+
+class XGBoostModel(
+    AbstractModel
+):
+    """
+    XGBoost Regressor.
+    """
+
+    def __init__(
+        self,
+        **params,
+    ) -> None:
         super().__init__()
 
-        params.setdefault("random_state", AbstractModel.seed)
-        params.setdefault("n_jobs", -1)
+        params.setdefault(
+            "random_state",
+            AbstractModel.seed,
+        )
 
-        self.model = XGBRegressor(**params)
+        params.setdefault(
+            "n_jobs",
+            -1,
+        )
+
+        self.model = XGBRegressor(
+            **params
+        )
 
     def _fit(
         self,
@@ -278,6 +434,7 @@ class XGBoostModel(AbstractModel):
         y: pd.DataFrame,
         sample_weight: np.ndarray | None = None,
     ) -> None:
+
         self.model.fit(
             x,
             self._target_values(y),
@@ -288,4 +445,7 @@ class XGBoostModel(AbstractModel):
         self,
         x: pd.DataFrame,
     ) -> np.ndarray:
-        return self.model.predict(x)
+
+        return self.model.predict(
+            x
+        )
