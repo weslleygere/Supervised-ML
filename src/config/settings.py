@@ -7,7 +7,20 @@ from decouple import config
 from src.core.models.factory import RegressionModels
 
 
-def _optional_int(value: str | None) -> int | None:
+# =============================================================================
+# HELPERS
+# =============================================================================
+
+
+def _optional_int(
+    value: str | None,
+) -> int | None:
+    """
+    Parse an optional integer from the environment.
+
+    Values such as "", "none" or None disable the option.
+    """
+
     if value is None:
         return None
 
@@ -19,25 +32,47 @@ def _optional_int(value: str | None) -> int | None:
     return int(value)
 
 
+# =============================================================================
+# DATA
+# =============================================================================
+
+
 @dataclass
 class DataConfig:
     data_path: str
     schema_path: str
     output_dir_base: str
-    output_dir: str = field(init=False)
 
-    DATA_EXTENSIONS = frozenset(
-        {"csv", "xlsx", "parquet", "json"}
+    output_dir: str = field(
+        init=False
     )
 
-    def __post_init__(self) -> None:
+    DATA_EXTENSIONS = frozenset(
+        {
+            "csv",
+            "xlsx",
+            "parquet",
+            "json",
+        }
+    )
+
+    def __post_init__(
+        self,
+    ) -> None:
+
         self._validate_dataset_file()
         self._validate_schema_file()
         self._validate_output_base()
-        self.output_dir = self._create_output_dir()
+
+        self.output_dir = (
+            self._create_output_dir()
+        )
 
     @classmethod
-    def from_env(cls) -> "DataConfig":
+    def from_env(
+        cls,
+    ) -> "DataConfig":
+
         return cls(
             data_path=str(
                 config(
@@ -59,10 +94,16 @@ class DataConfig:
             ),
         )
 
-    def _validate_dataset_file(self) -> None:
-        if not os.path.isfile(self.data_path):
+    def _validate_dataset_file(
+        self,
+    ) -> None:
+
+        if not os.path.isfile(
+            self.data_path
+        ):
             raise FileNotFoundError(
-                f"Dataset file not found: {self.data_path}"
+                f"Dataset file not found: "
+                f"{self.data_path}"
             )
 
         extension = (
@@ -73,40 +114,61 @@ class DataConfig:
 
         if extension not in self.DATA_EXTENSIONS:
             allowed = ", ".join(
-                sorted(self.DATA_EXTENSIONS)
+                sorted(
+                    self.DATA_EXTENSIONS
+                )
             )
 
             raise ValueError(
-                f"Unsupported dataset extension '.{extension}'. "
+                f"Unsupported dataset extension "
+                f"'.{extension}'. "
                 f"Allowed: {allowed}"
             )
 
-    def _validate_schema_file(self) -> None:
-        if not os.path.isfile(self.schema_path):
-            raise FileNotFoundError(
-                f"Schema file not found: {self.schema_path}"
-            )
+    def _validate_schema_file(
+        self,
+    ) -> None:
 
-        if not self.schema_path.lower().endswith(".json"):
-            raise ValueError(
-                f"Schema file must be a JSON file: "
+        if not os.path.isfile(
+            self.schema_path
+        ):
+            raise FileNotFoundError(
+                f"Schema file not found: "
                 f"{self.schema_path}"
             )
 
-    def _validate_output_base(self) -> None:
-        if not os.path.exists(self.output_dir_base):
+        if not self.schema_path.lower().endswith(
+            ".json"
+        ):
+            raise ValueError(
+                f"Schema file must be JSON: "
+                f"{self.schema_path}"
+            )
+
+    def _validate_output_base(
+        self,
+    ) -> None:
+
+        if not os.path.exists(
+            self.output_dir_base
+        ):
             os.makedirs(
                 self.output_dir_base,
                 exist_ok=True,
             )
 
-        elif not os.path.isdir(self.output_dir_base):
+        elif not os.path.isdir(
+            self.output_dir_base
+        ):
             raise NotADirectoryError(
                 f"OUTPUT_DIR is not a directory: "
                 f"{self.output_dir_base}"
             )
 
-    def _create_output_dir(self) -> str:
+    def _create_output_dir(
+        self,
+    ) -> str:
+
         timestamp = datetime.now().strftime(
             "%Y%m%d_%H%M%S"
         )
@@ -124,31 +186,59 @@ class DataConfig:
         return output_dir
 
 
+# =============================================================================
+# MODELS AND FEATURES
+# =============================================================================
+
+
 @dataclass
 class ModelConfig:
     models_config: str
     random_state: int
+
     feature_set: str
-    pca_components: int | None
+
+    pca_indices_components: int | None
+    pca_embeddings_components: int | None
 
     models: list[RegressionModels] = field(
         init=False
     )
 
-    def __post_init__(self) -> None:
-        self.models = self._parse_models()
+    def __post_init__(
+        self,
+    ) -> None:
+
+        self.models = (
+            self._parse_models()
+        )
+
         self._validate_random_state()
         self._validate_feature_set()
-        self._validate_pca_components()
+
+        self._validate_pca_components(
+            name="PCA_INDICES_COMPONENTS",
+            value=self.pca_indices_components,
+        )
+
+        self._validate_pca_components(
+            name="PCA_EMBEDDINGS_COMPONENTS",
+            value=self.pca_embeddings_components,
+        )
 
         from src.core.models.definitions import (
             AbstractModel,
         )
 
-        AbstractModel.seed = self.random_state
+        AbstractModel.seed = (
+            self.random_state
+        )
 
     @classmethod
-    def from_env(cls) -> "ModelConfig":
+    def from_env(
+        cls,
+    ) -> "ModelConfig":
+
         return cls(
             models_config=str(
                 config(
@@ -167,11 +257,23 @@ class ModelConfig:
                     default="indices",
                 )
             ).lower(),
-            pca_components=_optional_int(
-                str(
-                    config(
-                        "PCA_COMPONENTS",
-                        default="50",
+            pca_indices_components=(
+                _optional_int(
+                    str(
+                        config(
+                            "PCA_INDICES_COMPONENTS",
+                            default="30",
+                        )
+                    )
+                )
+            ),
+            pca_embeddings_components=(
+                _optional_int(
+                    str(
+                        config(
+                            "PCA_EMBEDDINGS_COMPONENTS",
+                            default="30",
+                        )
                     )
                 )
             ),
@@ -181,10 +283,14 @@ class ModelConfig:
         self,
     ) -> list[RegressionModels]:
 
-        value = self.models_config.strip()
+        value = (
+            self.models_config.strip()
+        )
 
         if value.lower() == "all":
-            return list(RegressionModels)
+            return list(
+                RegressionModels
+            )
 
         names = [
             name.strip().upper()
@@ -197,16 +303,24 @@ class ModelConfig:
             for name in names
         ]
 
-        return self._check_duplicates(models)
+        return self._check_duplicates(
+            models
+        )
 
-    def _validate_random_state(self) -> None:
+    def _validate_random_state(
+        self,
+    ) -> None:
+
         if self.random_state < 0:
             raise ValueError(
                 "RANDOM_STATE must be >= 0, "
                 f"got: {self.random_state}"
             )
 
-    def _validate_feature_set(self) -> None:
+    def _validate_feature_set(
+        self,
+    ) -> None:
+
         valid = {
             "indices",
             "embeddings",
@@ -219,13 +333,19 @@ class ModelConfig:
                 "indices, embeddings, both."
             )
 
-    def _validate_pca_components(self) -> None:
+    @staticmethod
+    def _validate_pca_components(
+        name: str,
+        value: int | None,
+    ) -> None:
+
         if (
-            self.pca_components is not None
-            and self.pca_components <= 0
+            value is not None
+            and value <= 0
         ):
             raise ValueError(
-                "PCA_COMPONENTS must be > 0 or None."
+                f"{name} must be > 0 "
+                "or None."
             )
 
     @staticmethod
@@ -234,7 +354,9 @@ class ModelConfig:
     ) -> RegressionModels:
 
         try:
-            return RegressionModels[name]
+            return RegressionModels[
+                name
+            ]
 
         except KeyError as exc:
             valid = ", ".join(
@@ -255,15 +377,24 @@ class ModelConfig:
         seen = set()
 
         for model in models:
+
             if model in seen:
                 raise ValueError(
                     f"Duplicate model "
-                    f"'{model.name}' found in MODELS."
+                    f"'{model.name}' found "
+                    "in MODELS."
                 )
 
-            seen.add(model)
+            seen.add(
+                model
+            )
 
         return models
+
+
+# =============================================================================
+# VALIDATION
+# =============================================================================
 
 
 @dataclass
@@ -272,7 +403,10 @@ class ValidationConfig:
     inner_splits: int
     optuna_trials: int
 
-    def __post_init__(self) -> None:
+    def __post_init__(
+        self,
+    ) -> None:
+
         if self.outer_splits < 2:
             raise ValueError(
                 "OUTER_SPLITS must be >= 2."
@@ -312,19 +446,32 @@ class ValidationConfig:
         )
 
 
+# =============================================================================
+# LOGGING
+# =============================================================================
+
+
 @dataclass
 class LoggingConfig:
     log_level: str
     debug: bool
 
-    def __post_init__(self) -> None:
-        if self.log_level.upper() not in {
+    def __post_init__(
+        self,
+    ) -> None:
+
+        valid_levels = {
             "DEBUG",
             "INFO",
             "WARNING",
             "ERROR",
             "CRITICAL",
-        }:
+        }
+
+        if (
+            self.log_level.upper()
+            not in valid_levels
+        ):
             raise ValueError(
                 f"Invalid LOG_LEVEL: "
                 f"{self.log_level}"
@@ -348,6 +495,11 @@ class LoggingConfig:
                 cast=bool,
             ),
         )
+
+
+# =============================================================================
+# SETTINGS
+# =============================================================================
 
 
 @dataclass

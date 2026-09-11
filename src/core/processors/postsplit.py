@@ -19,15 +19,15 @@ class PostSplitProcessor:
     Feature representations
     -----------------------
     indices:
-        RobustScaler
+        StandardScaler -> PCA
 
     embeddings:
         StandardScaler -> PCA
 
     both:
-        RobustScaler(indices)
+        StandardScaler(indices) -> PCA_indices
         +
-        StandardScaler(embeddings) -> PCA
+        StandardScaler(embeddings) -> PCA_embeddings
 
     All preprocessing steps are fitted only on the training fold.
     """
@@ -36,21 +36,32 @@ class PostSplitProcessor:
         self,
         schema: Schema,
         feature_set: str,
-        pca_components: int | None,
+        pca_indices_components: int | None,
+        pca_embeddings_components: int | None,
     ) -> None:
 
         self.schema = schema
         self.feature_set = feature_set
-        self.pca_components = pca_components
 
-        self.index_scaler = RobustScaler()
+        self.pca_indices_components = (
+            pca_indices_components
+        )
+
+        self.pca_embeddings_components = (
+            pca_embeddings_components
+        )
+
+        self.index_scaler = StandardScaler()
         self.embedding_scaler = StandardScaler()
         self.target_scaler = RobustScaler()
 
-        self.pca: PCA | None = None
+        self.index_pca: PCA | None = None
+        self.embedding_pca: PCA | None = None
 
         self.index_cols: list[str] = []
-        self.embedding_cols: list[str] = []
+
+        self.processed_index_cols: list[str] = []
+        self.processed_embedding_cols: list[str] = []
 
     # =========================================================================
     # FIT + TRANSFORM
@@ -121,6 +132,12 @@ class PostSplitProcessor:
                 self._transform_embeddings(
                     x_test
                 )
+            )
+
+        if not parts:
+            raise ValueError(
+                f"Invalid feature set: "
+                f"{self.feature_set}"
             )
 
         return pd.concat(
@@ -202,6 +219,9 @@ class PostSplitProcessor:
         self,
         x_train: pd.DataFrame,
     ) -> pd.DataFrame:
+        """
+        Standardize aggregated acoustic-index features and apply PCA.
+        """
 
         self.index_cols = (
             self.schema.index_columns(
@@ -214,17 +234,58 @@ class PostSplitProcessor:
                 "No acoustic index columns were found."
             )
 
-        values = (
-            self.index_scaler.fit_transform(
-                x_train[
-                    self.index_cols
-                ]
+        matrix = (
+            x_train[
+                self.index_cols
+            ]
+            .to_numpy(
+                dtype=float
             )
         )
 
+        matrix = (
+            self.index_scaler.fit_transform(
+                matrix
+            )
+        )
+
+        if self.pca_indices_components is not None:
+
+            n_components = (
+                self._effective_pca_components(
+                    requested=(
+                        self.pca_indices_components
+                    ),
+                    matrix=matrix,
+                )
+            )
+
+            self.index_pca = PCA(
+                n_components=n_components,
+                svd_solver="full",
+            )
+
+            matrix = (
+                self.index_pca.fit_transform(
+                    matrix
+                )
+            )
+
+            self.processed_index_cols = [
+                f"indices_pc_{i + 1}"
+                for i in range(
+                    n_components
+                )
+            ]
+
+        else:
+            self.processed_index_cols = (
+                self.index_cols.copy()
+            )
+
         return pd.DataFrame(
-            values,
-            columns=self.index_cols,
+            matrix,
+            columns=self.processed_index_cols,
             index=x_train.index,
         )
 
@@ -233,17 +294,31 @@ class PostSplitProcessor:
         x_test: pd.DataFrame,
     ) -> pd.DataFrame:
 
-        values = (
-            self.index_scaler.transform(
-                x_test[
-                    self.index_cols
-                ]
+        matrix = (
+            x_test[
+                self.index_cols
+            ]
+            .to_numpy(
+                dtype=float
             )
         )
 
+        matrix = (
+            self.index_scaler.transform(
+                matrix
+            )
+        )
+
+        if self.index_pca is not None:
+            matrix = (
+                self.index_pca.transform(
+                    matrix
+                )
+            )
+
         return pd.DataFrame(
-            values,
-            columns=self.index_cols,
+            matrix,
+            columns=self.processed_index_cols,
             index=x_test.index,
         )
 
@@ -255,6 +330,9 @@ class PostSplitProcessor:
         self,
         x_train: pd.DataFrame,
     ) -> pd.DataFrame:
+        """
+        Standardize the aggregated embedding representation and apply PCA.
+        """
 
         matrix = np.stack(
             x_train[
@@ -268,26 +346,29 @@ class PostSplitProcessor:
             )
         )
 
-        if self.pca_components is not None:
+        if self.pca_embeddings_components is not None:
 
-            n_components = min(
-                self.pca_components,
-                matrix.shape[0],
-                matrix.shape[1],
+            n_components = (
+                self._effective_pca_components(
+                    requested=(
+                        self.pca_embeddings_components
+                    ),
+                    matrix=matrix,
+                )
             )
 
-            self.pca = PCA(
+            self.embedding_pca = PCA(
                 n_components=n_components,
                 svd_solver="full",
             )
 
             matrix = (
-                self.pca.fit_transform(
+                self.embedding_pca.fit_transform(
                     matrix
                 )
             )
 
-            self.embedding_cols = [
+            self.processed_embedding_cols = [
                 f"embedding_pc_{i + 1}"
                 for i in range(
                     n_components
@@ -295,7 +376,7 @@ class PostSplitProcessor:
             ]
 
         else:
-            self.embedding_cols = [
+            self.processed_embedding_cols = [
                 f"embedding_{i + 1}"
                 for i in range(
                     matrix.shape[1]
@@ -304,7 +385,7 @@ class PostSplitProcessor:
 
         return pd.DataFrame(
             matrix,
-            columns=self.embedding_cols,
+            columns=self.processed_embedding_cols,
             index=x_train.index,
         )
 
@@ -325,13 +406,48 @@ class PostSplitProcessor:
             )
         )
 
-        if self.pca is not None:
-            matrix = self.pca.transform(
-                matrix
+        if self.embedding_pca is not None:
+            matrix = (
+                self.embedding_pca.transform(
+                    matrix
+                )
             )
 
         return pd.DataFrame(
             matrix,
-            columns=self.embedding_cols,
+            columns=self.processed_embedding_cols,
             index=x_test.index,
+        )
+
+    # =========================================================================
+    # PCA
+    # =========================================================================
+
+    @staticmethod
+    def _effective_pca_components(
+        requested: int,
+        matrix: np.ndarray,
+    ) -> int:
+        """
+        Determine a valid PCA dimensionality for the current training fold.
+
+        PCA dimensionality is limited by:
+        - the requested number of components;
+        - the number of original features;
+        - the effective rank supported by the number of training samples.
+        """
+
+        max_components = min(
+            matrix.shape[0] - 1,
+            matrix.shape[1],
+        )
+
+        if max_components < 1:
+            raise ValueError(
+                "PCA requires at least two training observations."
+            )
+
+        return min(
+            requested,
+            max_components,
         )

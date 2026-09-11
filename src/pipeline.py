@@ -29,9 +29,12 @@ class Pipeline:
         self,
         settings: Settings,
     ) -> None:
+
         self.settings = settings
 
-    def run(self) -> None:
+    def run(
+        self,
+    ) -> None:
 
         # =====================================================================
         # DATA LOADING
@@ -58,8 +61,10 @@ class Pipeline:
             schema=schema
         )
 
-        df_processed = pre_split_processor.process(
-            df_raw
+        df_processed = (
+            pre_split_processor.process(
+                df_raw
+            )
         )
 
         logger.info(
@@ -89,7 +94,12 @@ class Pipeline:
             models=self.settings.model.models,
             random_state=self.settings.model.random_state,
             feature_set=self.settings.model.feature_set,
-            pca_components=self.settings.model.pca_components,
+            pca_indices_components=(
+                self.settings.model.pca_indices_components
+            ),
+            pca_embeddings_components=(
+                self.settings.model.pca_embeddings_components
+            ),
             outer_splits=self.settings.validation.outer_splits,
             inner_splits=self.settings.validation.inner_splits,
             optuna_trials=self.settings.validation.optuna_trials,

@@ -74,6 +74,8 @@ class ModelEvaluator:
     - outer CV grouped by Point;
     - inner CV grouped by Point;
     - Optuna selects hyperparameters using inner OOF predictions;
+    - indices and embeddings are processed independently;
+    - PCA is fitted only inside each training fold;
     - every Point receives the same total weight.
     """
 
@@ -84,7 +86,8 @@ class ModelEvaluator:
         models: list[RegressionModels],
         random_state: int,
         feature_set: str,
-        pca_components: int | None,
+        pca_indices_components: int | None,
+        pca_embeddings_components: int | None,
         outer_splits: int,
         inner_splits: int,
         optuna_trials: int,
@@ -97,7 +100,14 @@ class ModelEvaluator:
         self.random_state = random_state
 
         self.feature_set = feature_set
-        self.pca_components = pca_components
+
+        self.pca_indices_components = (
+            pca_indices_components
+        )
+
+        self.pca_embeddings_components = (
+            pca_embeddings_components
+        )
 
         self.outer_splits = outer_splits
         self.inner_splits = inner_splits
@@ -563,7 +573,12 @@ class ModelEvaluator:
             processor = PostSplitProcessor(
                 schema=self.schema,
                 feature_set=self.feature_set,
-                pca_components=self.pca_components,
+                pca_indices_components=(
+                    self.pca_indices_components
+                ),
+                pca_embeddings_components=(
+                    self.pca_embeddings_components
+                ),
             )
 
             (
@@ -597,7 +612,9 @@ class ModelEvaluator:
                         X_validation_processed
                     ),
                     weights=self._point_weights(
-                        df.iloc[train_idx]
+                        df.iloc[
+                            train_idx
+                        ]
                     ),
                     processor=processor,
                 )
@@ -698,7 +715,12 @@ class ModelEvaluator:
         processor = PostSplitProcessor(
             schema=self.schema,
             feature_set=self.feature_set,
-            pca_components=self.pca_components,
+            pca_indices_components=(
+                self.pca_indices_components
+            ),
+            pca_embeddings_components=(
+                self.pca_embeddings_components
+            ),
         )
 
         (
