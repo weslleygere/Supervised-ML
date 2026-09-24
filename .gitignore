@@ -8,6 +8,8 @@ env/
 
 # Dados sensíveis
 data/raw/
+*.ipynb
+*.sh
 
 # Cache Python
 __pycache__/
@@ -17,6 +19,7 @@ __pycache__/
 # Logs e outputs
 *.log
 output/
+output_pca/
 
 # Arquivos temporários
 *.tmp

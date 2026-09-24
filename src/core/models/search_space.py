@@ -40,7 +40,7 @@ def suggest_parameters(
                 "alpha": trial.suggest_float(
                     "alpha",
                     1e-4,
-                    1e3,
+                    2e3,
                     log=True,
                 ),
             }
@@ -54,13 +54,13 @@ def suggest_parameters(
                 "alpha": trial.suggest_float(
                     "alpha",
                     1e-4,
-                    1e1,
+                    2.0,
                     log=True,
                 ),
                 "l1_ratio": trial.suggest_float(
                     "l1_ratio",
-                    0.05,
-                    0.95,
+                    0.01,
+                    1.0,
                 ),
                 "max_iter": 10000,
             }
@@ -73,20 +73,20 @@ def suggest_parameters(
             return {
                 "C": trial.suggest_float(
                     "C",
-                    1e-2,
+                    0.3,
                     1e2,
                     log=True,
                 ),
                 "epsilon": trial.suggest_float(
                     "epsilon",
-                    1e-2,
-                    0.5,
+                    1e-3,
+                    0.2,
                     log=True,
                 ),
                 "kernel": "rbf",
                 "gamma": "scale",
                 "cache_size": 2000,
-                "max_iter": 50000,
+                "max_iter": 100000,
             }
 
         # =====================================================================
