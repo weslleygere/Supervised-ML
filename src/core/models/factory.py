@@ -1,100 +1,23 @@
-from enum import IntEnum, auto
-
-from .definitions import (
-    AbstractModel,
-    ElasticNetModel,
-    ExtraTreesModel,
-    RandomForestModel,
-    RidgeRegressionModel,
-    SVRModel,
-    XGBoostModel,
-)
+from enum import Enum
+from .definitions import make_estimator
 
 
-# =============================================================================
-# REGRESSION MODELS
-# =============================================================================
-
-
-class RegressionModels(IntEnum):
-    """
-    Regression models evaluated in the HFI prediction experiment.
-    """
-
-    RIDGE_REGRESSION = auto()
-    ELASTIC_NET = auto()
-    SVR = auto()
-    RANDOM_FOREST = auto()
-    EXTRA_TREES = auto()
-    XGBOOST = auto()
-
-
-# =============================================================================
-# MODEL FACTORY
-# =============================================================================
+class RegressionModels(str, Enum):
+    RIDGE_REGRESSION = "RIDGE_REGRESSION"
+    ELASTIC_NET = "ELASTIC_NET"
+    HUBER = "HUBER"
+    PLS = "PLS"
+    SVR = "SVR"
+    KERNEL_RIDGE = "KERNEL_RIDGE"
+    GAUSSIAN_PROCESS = "GAUSSIAN_PROCESS"
+    RANDOM_FOREST = "RANDOM_FOREST"
+    EXTRA_TREES = "EXTRA_TREES"
+    XGBOOST = "XGBOOST"
+    CATBOOST = "CATBOOST"
 
 
 class ModelFactory:
-    """
-    Factory responsible for creating regression model instances.
-    """
-
     @staticmethod
-    def create_model(
-        model: RegressionModels,
-        params: dict | None = None,
-    ) -> AbstractModel:
-        """
-        Create a regression model using the supplied hyperparameters.
-
-        Parameters
-        ----------
-        model : RegressionModels
-            Model to instantiate.
-        params : dict | None
-            Hyperparameters selected for the model.
-            If None, default parameters are used.
-
-        Returns
-        -------
-        AbstractModel
-            Instantiated regression model.
-        """
-
-        params = params or {}
-
-        match model:
-            case RegressionModels.RIDGE_REGRESSION:
-                return RidgeRegressionModel(
-                    **params
-                )
-
-            case RegressionModels.ELASTIC_NET:
-                return ElasticNetModel(
-                    **params
-                )
-
-            case RegressionModels.SVR:
-                return SVRModel(
-                    **params
-                )
-
-            case RegressionModels.RANDOM_FOREST:
-                return RandomForestModel(
-                    **params
-                )
-
-            case RegressionModels.EXTRA_TREES:
-                return ExtraTreesModel(
-                    **params
-                )
-
-            case RegressionModels.XGBOOST:
-                return XGBoostModel(
-                    **params
-                )
-
-            case _:
-                raise ValueError(
-                    f"Unsupported model: {model}"
-                )
+    def create_model(model, params=None, random_state=42, n_jobs=1):
+        name = model.value if isinstance(model, RegressionModels) else str(model)
+        return make_estimator(name, params or {}, random_state, n_jobs)

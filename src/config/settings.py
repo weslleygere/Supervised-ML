@@ -1,525 +1,115 @@
-import os
-from dataclasses import dataclass, field
-from datetime import datetime
+"""Explicit, side-effect-free configuration for the three experiment stages."""
+from dataclasses import asdict, dataclass, fields
+from pathlib import Path
+from typing import get_type_hints
+from decouple import Config, RepositoryEmpty, RepositoryEnv
 
-from decouple import config
 
-from src.core.models.factory import RegressionModels
-
-
-# =============================================================================
-# HELPERS
-# =============================================================================
-
-
-def _optional_int(
-    value: str | None,
-) -> int | None:
-    """
-    Parse an optional integer from the environment.
-
-    Values such as "", "none" or None disable the option.
-    """
-
-    if value is None:
-        return None
-
-    value = str(value).strip()
-
-    if not value or value.lower() == "none":
-        return None
-
-    return int(value)
-
-
-# =============================================================================
-# DATA
-# =============================================================================
-
-
-@dataclass
-class DataConfig:
-    data_path: str
-    schema_path: str
-    output_dir_base: str
-
-    output_dir: str = field(
-        init=False
-    )
-
-    DATA_EXTENSIONS = frozenset(
-        {
-            "csv",
-            "xlsx",
-            "parquet",
-            "json",
-        }
-    )
-
-    def __post_init__(
-        self,
-    ) -> None:
-
-        self._validate_dataset_file()
-        self._validate_schema_file()
-        self._validate_output_base()
-
-        self.output_dir = (
-            self._create_output_dir()
-        )
-
-    @classmethod
-    def from_env(
-        cls,
-    ) -> "DataConfig":
-
-        return cls(
-            data_path=str(
-                config(
-                    "DATA_PATH",
-                    default="data/raw/data.csv",
-                )
-            ),
-            schema_path=str(
-                config(
-                    "SCHEMA_PATH",
-                    default="data/schema/schema.json",
-                )
-            ),
-            output_dir_base=str(
-                config(
-                    "OUTPUT_DIR",
-                    default="output",
-                )
-            ),
-        )
-
-    def _validate_dataset_file(
-        self,
-    ) -> None:
-
-        if not os.path.isfile(
-            self.data_path
-        ):
-            raise FileNotFoundError(
-                f"Dataset file not found: "
-                f"{self.data_path}"
-            )
-
-        extension = (
-            self.data_path
-            .rsplit(".", 1)[-1]
-            .lower()
-        )
-
-        if extension not in self.DATA_EXTENSIONS:
-            allowed = ", ".join(
-                sorted(
-                    self.DATA_EXTENSIONS
-                )
-            )
-
-            raise ValueError(
-                f"Unsupported dataset extension "
-                f"'.{extension}'. "
-                f"Allowed: {allowed}"
-            )
-
-    def _validate_schema_file(
-        self,
-    ) -> None:
-
-        if not os.path.isfile(
-            self.schema_path
-        ):
-            raise FileNotFoundError(
-                f"Schema file not found: "
-                f"{self.schema_path}"
-            )
-
-        if not self.schema_path.lower().endswith(
-            ".json"
-        ):
-            raise ValueError(
-                f"Schema file must be JSON: "
-                f"{self.schema_path}"
-            )
-
-    def _validate_output_base(
-        self,
-    ) -> None:
-
-        if not os.path.exists(
-            self.output_dir_base
-        ):
-            os.makedirs(
-                self.output_dir_base,
-                exist_ok=True,
-            )
-
-        elif not os.path.isdir(
-            self.output_dir_base
-        ):
-            raise NotADirectoryError(
-                f"OUTPUT_DIR is not a directory: "
-                f"{self.output_dir_base}"
-            )
-
-    def _create_output_dir(
-        self,
-    ) -> str:
-
-        timestamp = datetime.now().strftime(
-            "%Y%m%d_%H%M%S"
-        )
-
-        output_dir = os.path.join(
-            self.output_dir_base,
-            timestamp,
-        )
-
-        os.makedirs(
-            output_dir,
-            exist_ok=True,
-        )
-
-        return output_dir
-
-
-# =============================================================================
-# MODELS AND FEATURES
-# =============================================================================
-
-
-@dataclass
-class ModelConfig:
-    models_config: str
-    random_state: int
-
-    feature_set: str
-
-    pca_indices_components: int | None
-    pca_embeddings_components: int | None
-
-    models: list[RegressionModels] = field(
-        init=False
-    )
-
-    def __post_init__(
-        self,
-    ) -> None:
-
-        self.models = (
-            self._parse_models()
-        )
-
-        self._validate_random_state()
-        self._validate_feature_set()
-
-        self._validate_pca_components(
-            name="PCA_INDICES_COMPONENTS",
-            value=self.pca_indices_components,
-        )
-
-        self._validate_pca_components(
-            name="PCA_EMBEDDINGS_COMPONENTS",
-            value=self.pca_embeddings_components,
-        )
-
-        from src.core.models.definitions import (
-            AbstractModel,
-        )
-
-        AbstractModel.seed = (
-            self.random_state
-        )
-
-    @classmethod
-    def from_env(
-        cls,
-    ) -> "ModelConfig":
-
-        return cls(
-            models_config=str(
-                config(
-                    "MODELS",
-                    default="all",
-                )
-            ),
-            random_state=config(
-                "RANDOM_STATE",
-                default=42,
-                cast=int,
-            ),
-            feature_set=str(
-                config(
-                    "FEATURE_SET",
-                    default="indices",
-                )
-            ).lower(),
-            pca_indices_components=(
-                _optional_int(
-                    str(
-                        config(
-                            "PCA_INDICES_COMPONENTS",
-                            default="30",
-                        )
-                    )
-                )
-            ),
-            pca_embeddings_components=(
-                _optional_int(
-                    str(
-                        config(
-                            "PCA_EMBEDDINGS_COMPONENTS",
-                            default="30",
-                        )
-                    )
-                )
-            ),
-        )
-
-    def _parse_models(
-        self,
-    ) -> list[RegressionModels]:
-
-        value = (
-            self.models_config.strip()
-        )
-
-        if value.lower() == "all":
-            return list(
-                RegressionModels
-            )
-
-        names = [
-            name.strip().upper()
-            for name in value.split(",")
-            if name.strip()
-        ]
-
-        models = [
-            self._to_enum(name)
-            for name in names
-        ]
-
-        return self._check_duplicates(
-            models
-        )
-
-    def _validate_random_state(
-        self,
-    ) -> None:
-
-        if self.random_state < 0:
-            raise ValueError(
-                "RANDOM_STATE must be >= 0, "
-                f"got: {self.random_state}"
-            )
-
-    def _validate_feature_set(
-        self,
-    ) -> None:
-
-        valid = {
-            "indices",
-            "embeddings",
-            "both",
-        }
-
-        if self.feature_set not in valid:
-            raise ValueError(
-                "FEATURE_SET must be one of: "
-                "indices, embeddings, both."
-            )
-
-    @staticmethod
-    def _validate_pca_components(
-        name: str,
-        value: int | None,
-    ) -> None:
-
-        if (
-            value is not None
-            and value <= 0
-        ):
-            raise ValueError(
-                f"{name} must be > 0 "
-                "or None."
-            )
-
-    @staticmethod
-    def _to_enum(
-        name: str,
-    ) -> RegressionModels:
-
-        try:
-            return RegressionModels[
-                name
-            ]
-
-        except KeyError as exc:
-            valid = ", ".join(
-                model.name
-                for model in RegressionModels
-            )
-
-            raise ValueError(
-                f"Invalid model name '{name}'. "
-                f"Valid names: {valid}."
-            ) from exc
-
-    @staticmethod
-    def _check_duplicates(
-        models: list[RegressionModels],
-    ) -> list[RegressionModels]:
-
-        seen = set()
-
-        for model in models:
-
-            if model in seen:
-                raise ValueError(
-                    f"Duplicate model "
-                    f"'{model.name}' found "
-                    "in MODELS."
-                )
-
-            seen.add(
-                model
-            )
-
-        return models
-
-
-# =============================================================================
-# VALIDATION
-# =============================================================================
-
-
-@dataclass
-class ValidationConfig:
-    outer_splits: int
-    inner_splits: int
-    optuna_trials: int
-
-    def __post_init__(
-        self,
-    ) -> None:
-
-        if self.outer_splits < 2:
-            raise ValueError(
-                "OUTER_SPLITS must be >= 2."
-            )
-
-        if self.inner_splits < 2:
-            raise ValueError(
-                "INNER_SPLITS must be >= 2."
-            )
-
-        if self.optuna_trials < 1:
-            raise ValueError(
-                "OPTUNA_TRIALS must be >= 1."
-            )
-
-    @classmethod
-    def from_env(
-        cls,
-    ) -> "ValidationConfig":
-
-        return cls(
-            outer_splits=config(
-                "OUTER_SPLITS",
-                default=5,
-                cast=int,
-            ),
-            inner_splits=config(
-                "INNER_SPLITS",
-                default=4,
-                cast=int,
-            ),
-            optuna_trials=config(
-                "OPTUNA_TRIALS",
-                default=20,
-                cast=int,
-            ),
-        )
-
-
-# =============================================================================
-# LOGGING
-# =============================================================================
-
-
-@dataclass
-class LoggingConfig:
-    log_level: str
-    debug: bool
-
-    def __post_init__(
-        self,
-    ) -> None:
-
-        valid_levels = {
-            "DEBUG",
-            "INFO",
-            "WARNING",
-            "ERROR",
-            "CRITICAL",
-        }
-
-        if (
-            self.log_level.upper()
-            not in valid_levels
-        ):
-            raise ValueError(
-                f"Invalid LOG_LEVEL: "
-                f"{self.log_level}"
-            )
-
-    @classmethod
-    def from_env(
-        cls,
-    ) -> "LoggingConfig":
-
-        return cls(
-            log_level=str(
-                config(
-                    "LOG_LEVEL",
-                    default="INFO",
-                )
-            ),
-            debug=config(
-                "DEBUG",
-                default=False,
-                cast=bool,
-            ),
-        )
-
-
-# =============================================================================
-# SETTINGS
-# =============================================================================
-
-
-@dataclass
+@dataclass(frozen=True)
 class Settings:
-    data: DataConfig
-    model: ModelConfig
-    validation: ValidationConfig
-    logging: LoggingConfig
+    data_path: str = "data/raw/data.parquet"
+    schema_path: str = "data/schema/schema.json"
+    output_dir: str = "output_experiments"
+    run_mode: str = "nested_selection"
+    source_run: str = ""
+    resume_run: str = ""
+    feature_sets: tuple[str, ...] = ("indices", "embeddings", "both")
+    aggregation_strategies: tuple[str, ...] = ("mean", "mean_std", "hierarchical")
+    reduction_methods: tuple[str, ...] = ("none", "pca")
+    pca_component_candidates: tuple[int, ...] = (5, 10, 20, 40, 60)
+    pca_variance_candidates: tuple[float, ...] = (0.90, 0.95, 0.99)
+    feature_scalings: tuple[str, ...] = ("standard",)
+    models: tuple[str, ...] = ("all",)
+    selection_efforts: tuple[int, ...] = (1, 5, 10, 15, 25, 50)
+    selection_sampling_repeats: int = 10
+    outer_splits: int = 5
+    outer_repeats: int = 3
+    inner_splits: int = 4
+    optuna_trials: int = 60
+    split_seed: int = 42
+    sampling_seed: int = 1042
+    search_seed: int = 2042
+    model_seed: int = 3042
+    model_jobs: int = 1
+    cache_entries: int = 8
+    recording_start: str = "04:00"
+    recording_end: str = "06:00"
+    effort_analysis_counts: tuple[int, ...] = (1, 2, 3, 4, 5, 10, 15, 20, 25, 30, 40, 50)
+    effort_analysis_repeats: int = 50
+    bootstrap_repeats: int = 1000
+    confidence_level: float = 0.95
+    plateau_tolerance: float = 0.0
+    plateau_window: int = 3
+    log_level: str = "INFO"
+
+    def __post_init__(self):
+        from src.core.models.factory import RegressionModels
+        allowed = {
+            "run_mode": {"nested_selection", "effort_analysis", "final_fit"},
+            "feature_sets": {"indices", "embeddings", "both"},
+            "aggregation_strategies": {"mean", "mean_std", "hierarchical"},
+            "reduction_methods": {"none", "pca", "pca_variance"},
+            "feature_scalings": {"standard", "robust", "none"},
+            "models": {"all", *(m.name for m in RegressionModels)},
+            "log_level": {"DEBUG", "INFO", "WARNING", "ERROR"},
+        }
+        for key, choices in allowed.items():
+            value = getattr(self, key)
+            values = value if isinstance(value, tuple) else (value,)
+            if not values or len(values) != len(set(values)) or not set(values) <= choices:
+                raise ValueError(f"Invalid {key.upper()}: {value}. Choices: {sorted(choices)}")
+        if "all" in self.models and self.models != ("all",):
+            raise ValueError("MODELS=all cannot be combined with explicit names.")
+        for key in ("selection_efforts", "effort_analysis_counts", "pca_component_candidates"):
+            values = getattr(self, key)
+            if not values or tuple(sorted(set(values))) != values or min(values) < 1:
+                raise ValueError(f"{key.upper()} must be an increasing list of positive integers.")
+        if not self.pca_variance_candidates or any(not 0 < v < 1 for v in self.pca_variance_candidates):
+            raise ValueError("PCA_VARIANCE_CANDIDATES must contain fractions between zero and one.")
+        for key in ("outer_splits", "inner_splits"):
+            if getattr(self, key) < 2:
+                raise ValueError(f"{key.upper()} must be >= 2.")
+        for key in ("outer_repeats", "optuna_trials", "selection_sampling_repeats", "effort_analysis_repeats", "model_jobs", "cache_entries", "plateau_window"):
+            if getattr(self, key) < 1:
+                raise ValueError(f"{key.upper()} must be positive.")
+        for key in ("split_seed", "sampling_seed", "search_seed", "model_seed", "bootstrap_repeats"):
+            if getattr(self, key) < 0:
+                raise ValueError(f"{key.upper()} cannot be negative.")
+        if not 0 < self.confidence_level < 1 or self.plateau_tolerance < 0:
+            raise ValueError("Invalid confidence level or plateau tolerance.")
+        from datetime import time
+        if time.fromisoformat(self.recording_start) >= time.fromisoformat(self.recording_end):
+            raise ValueError("The recording window must be increasing within one local day.")
+        if self.run_mode != "nested_selection" and not self.source_run:
+            raise ValueError("SOURCE_RUN is required for effort_analysis and final_fit.")
+
+    def to_dict(self) -> dict:
+        return asdict(self)
 
     @classmethod
-    def from_env(
-        cls,
-    ) -> "Settings":
+    def from_dict(cls, values: dict) -> "Settings":
+        hints = get_type_hints(cls)
+        return cls(**{k: tuple(v) if getattr(hints[k], "__origin__", None) is tuple else v for k, v in values.items()})
 
-        return cls(
-            data=DataConfig.from_env(),
-            model=ModelConfig.from_env(),
-            validation=ValidationConfig.from_env(),
-            logging=LoggingConfig.from_env(),
-        )
-
-
-settings = Settings.from_env()
+    @classmethod
+    def from_env(cls, env_file: str = ".env", overrides: dict | None = None) -> "Settings":
+        repository = RepositoryEnv(env_file) if Path(env_file).exists() else RepositoryEmpty()
+        valid_keys = {f.name.upper() for f in fields(cls)}
+        unknown = set(getattr(repository, "data", {})) - valid_keys
+        if unknown:
+            raise ValueError(f"Unknown/legacy .env settings: {sorted(unknown)}. See .env.example.")
+        config = Config(repository)
+        hints = get_type_hints(cls)
+        values = {}
+        for field in fields(cls):
+            raw = config(field.name.upper(), default=None)
+            if raw is None:
+                continue
+            kind = hints[field.name]
+            if getattr(kind, "__origin__", None) is tuple:
+                subtype = kind.__args__[0]
+                values[field.name] = tuple(subtype(x.strip()) for x in raw.split(",") if x.strip())
+            else:
+                values[field.name] = kind(raw)
+        values.update({k: v for k, v in (overrides or {}).items() if v is not None})
+        return cls(**values)

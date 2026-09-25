@@ -31,3 +31,6 @@ output_pca/
 # Sistema operacional
 .DS_Store
 Thumbs.db
+output_experiments/
+
+.pytest_cache/

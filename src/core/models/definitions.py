@@ -1,451 +1,68 @@
-import time
-from typing import Optional
-
+"""Estimator construction. All families use equal-installation fitting weights."""
 import numpy as np
-import pandas as pd
-
-from sklearn.ensemble import (
-    ExtraTreesRegressor,
-    RandomForestRegressor,
-)
-from sklearn.linear_model import (
-    ElasticNet,
-    Ridge,
-)
+from sklearn.base import BaseEstimator, RegressorMixin
+from sklearn.cross_decomposition import PLSRegression
+from sklearn.dummy import DummyRegressor
+from sklearn.ensemble import ExtraTreesRegressor, RandomForestRegressor
+from sklearn.gaussian_process import GaussianProcessRegressor
+from sklearn.gaussian_process.kernels import ConstantKernel, Matern, RBF, WhiteKernel
+from sklearn.kernel_ridge import KernelRidge
+from sklearn.linear_model import ElasticNet, HuberRegressor, Ridge
 from sklearn.svm import SVR
-from xgboost import XGBRegressor
 
 
-# =============================================================================
-# EXCEPTIONS
-# =============================================================================
+class RelativeKernelRegressor(RegressorMixin, BaseEstimator):
+    """Compute bandwidth relative to training-only gamma='scale'."""
+    def __init__(self, kind="SVR", gamma_multiplier=1.0, C=1.0, epsilon=0.1, alpha=1.0):
+        self.kind = kind
+        self.gamma_multiplier = gamma_multiplier
+        self.C = C
+        self.epsilon = epsilon
+        self.alpha = alpha
 
-
-class ModelConvergenceError(RuntimeError):
-    """
-    Raised when a regression model does not converge.
-    """
-
-
-# =============================================================================
-# BASE MODEL
-# =============================================================================
-
-
-class AbstractModel:
-    """
-    Base class for the regression models used in the HFI experiment.
-    """
-
-    seed: Optional[int] = None
-
-    def __init__(self) -> None:
-        self.target_columns: list[str] = []
-
-    def fit(
-        self,
-        x: pd.DataFrame,
-        y: pd.DataFrame,
-        sample_weight: np.ndarray | None = None,
-    ) -> float:
-        """
-        Fit the model and return training time.
-        """
-
-        self.target_columns = list(
-            y.columns
+    def fit(self, x, y):
+        variance = float(np.var(x))
+        self.gamma_ = self.gamma_multiplier / (x.shape[1] * variance) if variance > 0 else self.gamma_multiplier
+        self.estimator_ = (
+            SVR(C=self.C, epsilon=self.epsilon, gamma=self.gamma_, max_iter=200000, cache_size=512)
+            if self.kind == "SVR" else KernelRidge(alpha=self.alpha, kernel="rbf", gamma=self.gamma_)
         )
-
-        start = time.perf_counter()
-
-        self._fit(
-            x,
-            y,
-            sample_weight,
-        )
-
-        return (
-            time.perf_counter()
-            - start
-        )
-
-    def predict(
-        self,
-        x: pd.DataFrame,
-    ) -> tuple[pd.DataFrame, float]:
-        """
-        Generate predictions and return prediction time.
-        """
-
-        start = time.perf_counter()
-
-        predictions = self._predict(
-            x
-        )
-
-        elapsed = (
-            time.perf_counter()
-            - start
-        )
-
-        predictions = (
-            np.asarray(
-                predictions
-            )
-            .reshape(-1, 1)
-        )
-
-        return (
-            pd.DataFrame(
-                predictions,
-                columns=self.target_columns,
-                index=x.index,
-            ),
-            elapsed,
-        )
-
-    def _fit(
-        self,
-        x: pd.DataFrame,
-        y: pd.DataFrame,
-        sample_weight: np.ndarray | None = None,
-    ) -> None:
-        raise NotImplementedError
-
-    def _predict(
-        self,
-        x: pd.DataFrame,
-    ) -> np.ndarray:
-        raise NotImplementedError
-
-    @staticmethod
-    def _target_values(
-        y: pd.DataFrame,
-    ) -> np.ndarray:
-        """
-        Convert the single-target dataframe to a 1D array.
-        """
-
-        return (
-            y.iloc[:, 0]
-            .to_numpy()
-        )
-
-    @property
-    def name(self) -> str:
-        return (
-            self.__class__.__name__
-            .replace("Model", "")
-            .replace("_", " ")
-            .title()
-        )
-
-
-# =============================================================================
-# REGULARIZED LINEAR MODELS
-# =============================================================================
-
-
-class RidgeRegressionModel(
-    AbstractModel
-):
-    """
-    Ridge Regression.
-    """
-
-    def __init__(
-        self,
-        **params,
-    ) -> None:
-        super().__init__()
-
-        self.model = Ridge(
-            **params
-        )
-
-    def _fit(
-        self,
-        x: pd.DataFrame,
-        y: pd.DataFrame,
-        sample_weight: np.ndarray | None = None,
-    ) -> None:
-
-        self.model.fit(
-            x,
-            self._target_values(y),
-            sample_weight=sample_weight,
-        )
-
-    def _predict(
-        self,
-        x: pd.DataFrame,
-    ) -> np.ndarray:
-
-        return self.model.predict(
-            x
-        )
-
-
-class ElasticNetModel(
-    AbstractModel
-):
-    """
-    Elastic Net Regression.
-    """
-
-    def __init__(
-        self,
-        **params,
-    ) -> None:
-        super().__init__()
-
-        params.setdefault(
-            "random_state",
-            AbstractModel.seed,
-        )
-
-        self.model = ElasticNet(
-            **params
-        )
-
-    def _fit(
-        self,
-        x: pd.DataFrame,
-        y: pd.DataFrame,
-        sample_weight: np.ndarray | None = None,
-    ) -> None:
-
-        self.model.fit(
-            x,
-            self._target_values(y),
-            sample_weight=sample_weight,
-        )
-
-    def _predict(
-        self,
-        x: pd.DataFrame,
-    ) -> np.ndarray:
-
-        return self.model.predict(
-            x
-        )
-
-
-# =============================================================================
-# KERNEL MODEL
-# =============================================================================
-
-
-class SVRModel(
-    AbstractModel
-):
-    """
-    Support Vector Regression with RBF kernel.
-    """
-
-    def __init__(
-        self,
-        **params,
-    ) -> None:
-        super().__init__()
-
-        params.setdefault(
-            "kernel",
-            "rbf",
-        )
-
-        self.model = SVR(
-            **params
-        )
-
-    def _fit(
-        self,
-        x: pd.DataFrame,
-        y: pd.DataFrame,
-        sample_weight: np.ndarray | None = None,
-    ) -> None:
-
-        self.model.fit(
-            x,
-            self._target_values(y),
-            sample_weight=sample_weight,
-        )
-
-        if self.model.fit_status_ != 0:
-            raise ModelConvergenceError(
-                "SVR reached the iteration limit "
-                "before convergence."
-            )
-
-    def _predict(
-        self,
-        x: pd.DataFrame,
-    ) -> np.ndarray:
-
-        return self.model.predict(
-            x
-        )
-
-
-# =============================================================================
-# TREE ENSEMBLES
-# =============================================================================
-
-
-class RandomForestModel(
-    AbstractModel
-):
-    """
-    Random Forest Regressor.
-    """
-
-    def __init__(
-        self,
-        **params,
-    ) -> None:
-        super().__init__()
-
-        params.setdefault(
-            "random_state",
-            AbstractModel.seed,
-        )
-
-        params.setdefault(
-            "n_jobs",
-            -1,
-        )
-
-        self.model = (
-            RandomForestRegressor(
-                **params
-            )
-        )
-
-    def _fit(
-        self,
-        x: pd.DataFrame,
-        y: pd.DataFrame,
-        sample_weight: np.ndarray | None = None,
-    ) -> None:
-
-        self.model.fit(
-            x,
-            self._target_values(y),
-            sample_weight=sample_weight,
-        )
-
-    def _predict(
-        self,
-        x: pd.DataFrame,
-    ) -> np.ndarray:
-
-        return self.model.predict(
-            x
-        )
-
-
-class ExtraTreesModel(
-    AbstractModel
-):
-    """
-    Extra Trees Regressor.
-    """
-
-    def __init__(
-        self,
-        **params,
-    ) -> None:
-        super().__init__()
-
-        params.setdefault(
-            "random_state",
-            AbstractModel.seed,
-        )
-
-        params.setdefault(
-            "n_jobs",
-            -1,
-        )
-
-        self.model = (
-            ExtraTreesRegressor(
-                **params
-            )
-        )
-
-    def _fit(
-        self,
-        x: pd.DataFrame,
-        y: pd.DataFrame,
-        sample_weight: np.ndarray | None = None,
-    ) -> None:
-
-        self.model.fit(
-            x,
-            self._target_values(y),
-            sample_weight=sample_weight,
-        )
-
-    def _predict(
-        self,
-        x: pd.DataFrame,
-    ) -> np.ndarray:
-
-        return self.model.predict(
-            x
-        )
-
-
-# =============================================================================
-# GRADIENT BOOSTING
-# =============================================================================
-
-
-class XGBoostModel(
-    AbstractModel
-):
-    """
-    XGBoost Regressor.
-    """
-
-    def __init__(
-        self,
-        **params,
-    ) -> None:
-        super().__init__()
-
-        params.setdefault(
-            "random_state",
-            AbstractModel.seed,
-        )
-
-        params.setdefault(
-            "n_jobs",
-            -1,
-        )
-
-        self.model = XGBRegressor(
-            **params
-        )
-
-    def _fit(
-        self,
-        x: pd.DataFrame,
-        y: pd.DataFrame,
-        sample_weight: np.ndarray | None = None,
-    ) -> None:
-
-        self.model.fit(
-            x,
-            self._target_values(y),
-            sample_weight=sample_weight,
-        )
-
-    def _predict(
-        self,
-        x: pd.DataFrame,
-    ) -> np.ndarray:
-
-        return self.model.predict(
-            x
-        )
+        self.estimator_.fit(x, y)
+        self.fit_status_ = getattr(self.estimator_, "fit_status_", 0)
+        self.n_features_in_ = x.shape[1]
+        return self
+
+    def predict(self, x):
+        return self.estimator_.predict(x)
+
+
+def make_estimator(name: str, params: dict, seed: int, jobs: int):
+    p = dict(params)
+    if name == "RIDGE_REGRESSION":
+        return Ridge(**p)
+    if name == "ELASTIC_NET":
+        return ElasticNet(**p, max_iter=100000, random_state=seed)
+    if name == "HUBER":
+        return HuberRegressor(**p, max_iter=3000)
+    if name == "PLS":
+        return PLSRegression(**p, scale=False, max_iter=2000)
+    if name in {"SVR", "KERNEL_RIDGE"}:
+        return RelativeKernelRegressor(kind=name, **p)
+    if name in {"RANDOM_FOREST", "EXTRA_TREES"}:
+        klass = RandomForestRegressor if name == "RANDOM_FOREST" else ExtraTreesRegressor
+        return klass(**p, n_jobs=jobs, random_state=seed)
+    if name == "XGBOOST":
+        from xgboost import XGBRegressor
+        return XGBRegressor(**p, objective="reg:squarederror", tree_method="hist", n_jobs=jobs, random_state=seed)
+    if name == "CATBOOST":
+        from catboost import CatBoostRegressor
+        return CatBoostRegressor(**p, loss_function="RMSE", verbose=False, allow_writing_files=False, thread_count=jobs, random_seed=seed)
+    if name == "GAUSSIAN_PROCESS":
+        kernel_name = p.pop("kernel")
+        base = RBF(p["length_scale"]) if kernel_name == "rbf" else Matern(p["length_scale"], nu=1.5 if kernel_name == "matern15" else 2.5)
+        kernel = ConstantKernel(p["amplitude"]) * base + WhiteKernel(p["noise"])
+        # Optuna optimizes the kernel parameters; do not hide an extra optimizer.
+        return GaussianProcessRegressor(kernel=kernel, optimizer=None, alpha=1e-8, random_state=seed)
+    if name in {"DUMMY_MEAN", "DUMMY_MEDIAN"}:
+        return DummyRegressor(strategy="mean" if name == "DUMMY_MEAN" else "median")
+    raise ValueError(f"Unknown model {name}")
