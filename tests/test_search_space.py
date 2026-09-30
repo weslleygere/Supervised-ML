@@ -15,7 +15,7 @@ from src.core.models.search_space import (
 
 class DummyTrial:
     """
-    Minimal Optuna-like trial used to inspect the proposed search space
+    Minimal Optuna-like trial used to inspect the conditional search space
     without running an optimization study.
     """
 
@@ -25,13 +25,22 @@ class DummyTrial:
     ) -> None:
 
         self.values = values or {}
+
         self.categorical_choices = {}
+        self.float_parameters = {}
+        self.int_parameters = {}
+
+        self.suggested_names = set()
 
     def suggest_categorical(
         self,
         name,
         choices,
     ):
+
+        self.suggested_names.add(
+            name
+        )
 
         self.categorical_choices[
             name
@@ -54,6 +63,20 @@ class DummyTrial:
         **kwargs,
     ):
 
+        self.suggested_names.add(
+            name
+        )
+
+        self.float_parameters[
+            name
+        ] = {
+            "low":
+                low,
+            "high":
+                high,
+            **kwargs,
+        }
+
         if name in self.values:
             return self.values[
                 name
@@ -69,6 +92,20 @@ class DummyTrial:
         **kwargs,
     ):
 
+        self.suggested_names.add(
+            name
+        )
+
+        self.int_parameters[
+            name
+        ] = {
+            "low":
+                low,
+            "high":
+                high,
+            **kwargs,
+        }
+
         if name in self.values:
             return self.values[
                 name
@@ -81,6 +118,10 @@ class DummyTrial:
 # COMMON SEARCH SPACE
 # =============================================================================
 
+
+MODELS = list(
+    RegressionModels
+)
 
 FEATURE_SETS = (
     "indices",
@@ -117,18 +158,179 @@ PCA_EMBEDDINGS = (
 
 FEATURE_DIMENSIONS = {
     "mean": {
-        "indices": 10,
-        "embeddings": 20,
+        "indices":
+            10,
+        "embeddings":
+            20,
     },
     "mean_std": {
-        "indices": 20,
-        "embeddings": 40,
+        "indices":
+            20,
+        "embeddings":
+            40,
     },
     "hierarchical": {
-        "indices": 30,
-        "embeddings": 60,
+        "indices":
+            30,
+        "embeddings":
+            60,
     },
 }
+
+
+# =============================================================================
+# COMPLETE PIPELINE MODEL SELECTION
+# =============================================================================
+
+
+def test_model_family_is_part_of_pipeline_search() -> None:
+    """
+    Model family itself must be selected inside the Optuna trial.
+    """
+
+    trial = DummyTrial(
+        {
+            "feature_set":
+                "indices",
+
+            "aggregation":
+                "mean",
+
+            "reduction":
+                "none",
+
+            "model":
+                "SVR",
+
+            "svr_c":
+                10.0,
+
+            "svr_epsilon":
+                0.1,
+
+            "svr_gamma":
+                0.01,
+        }
+    )
+
+    configuration = (
+        suggest_pipeline_configuration(
+            trial=trial,
+            models=MODELS,
+            feature_sets=FEATURE_SETS,
+            aggregations=AGGREGATIONS,
+            reductions=REDUCTIONS,
+            pca_indices_candidates=(
+                PCA_INDICES
+            ),
+            pca_embeddings_candidates=(
+                PCA_EMBEDDINGS
+            ),
+            feature_dimensions=(
+                FEATURE_DIMENSIONS
+            ),
+            min_cv_train_size=8,
+        )
+    )
+
+    assert configuration[
+        "model"
+    ] == RegressionModels.SVR
+
+    assert trial.categorical_choices[
+        "model"
+    ] == tuple(
+        model.name
+        for model in MODELS
+    )
+
+
+def test_complete_pipeline_returns_all_required_components() -> None:
+    """
+    Every Optuna trial must describe one complete pipeline candidate.
+    """
+
+    trial = DummyTrial(
+        {
+            "feature_set":
+                "embeddings",
+
+            "aggregation":
+                "hierarchical",
+
+            "reduction":
+                "pca",
+
+            "model":
+                "RIDGE_REGRESSION",
+
+            "pca_embeddings_components__hierarchical":
+                4,
+
+            "ridge_alpha":
+                1.0,
+        }
+    )
+
+    configuration = (
+        suggest_pipeline_configuration(
+            trial=trial,
+            models=MODELS,
+            feature_sets=FEATURE_SETS,
+            aggregations=AGGREGATIONS,
+            reductions=REDUCTIONS,
+            pca_indices_candidates=(
+                PCA_INDICES
+            ),
+            pca_embeddings_candidates=(
+                PCA_EMBEDDINGS
+            ),
+            feature_dimensions=(
+                FEATURE_DIMENSIONS
+            ),
+            min_cv_train_size=8,
+        )
+    )
+
+    assert set(
+        configuration
+    ) == {
+        "model",
+        "feature_set",
+        "aggregation",
+        "reduction",
+        "pca_indices_components",
+        "pca_embeddings_components",
+        "model_params",
+    }
+
+    assert configuration[
+        "feature_set"
+    ] == "embeddings"
+
+    assert configuration[
+        "aggregation"
+    ] == "hierarchical"
+
+    assert configuration[
+        "reduction"
+    ] == "pca"
+
+    assert configuration[
+        "pca_indices_components"
+    ] is None
+
+    assert configuration[
+        "pca_embeddings_components"
+    ] == 4
+
+    assert configuration[
+        "model_params"
+    ][
+        "alpha"
+    ] == pytest.approx(
+        1.0
+    )
 
 
 # =============================================================================
@@ -145,11 +347,17 @@ def test_no_reduction_does_not_propose_pca_components() -> None:
         {
             "feature_set":
                 "both",
+
             "aggregation":
                 "hierarchical",
+
             "reduction":
                 "none",
-            "alpha":
+
+            "model":
+                "RIDGE_REGRESSION",
+
+            "ridge_alpha":
                 1.0,
         }
     )
@@ -157,10 +365,7 @@ def test_no_reduction_does_not_propose_pca_components() -> None:
     configuration = (
         suggest_pipeline_configuration(
             trial=trial,
-            model=(
-                RegressionModels
-                .RIDGE_REGRESSION
-            ),
+            models=MODELS,
             feature_sets=FEATURE_SETS,
             aggregations=AGGREGATIONS,
             reductions=REDUCTIONS,
@@ -173,7 +378,7 @@ def test_no_reduction_does_not_propose_pca_components() -> None:
             feature_dimensions=(
                 FEATURE_DIMENSIONS
             ),
-            min_inner_train_size=8,
+            min_cv_train_size=8,
         )
     )
 
@@ -194,7 +399,7 @@ def test_no_reduction_does_not_propose_pca_components() -> None:
             "pca_"
         )
         for name in (
-            trial.categorical_choices
+            trial.suggested_names
         )
     )
 
@@ -213,13 +418,20 @@ def test_indices_only_proposes_indices_pca() -> None:
         {
             "feature_set":
                 "indices",
+
             "aggregation":
                 "mean",
+
             "reduction":
                 "pca",
+
+            "model":
+                "RIDGE_REGRESSION",
+
             "pca_indices_components__mean":
                 4,
-            "alpha":
+
+            "ridge_alpha":
                 1.0,
         }
     )
@@ -227,10 +439,7 @@ def test_indices_only_proposes_indices_pca() -> None:
     configuration = (
         suggest_pipeline_configuration(
             trial=trial,
-            model=(
-                RegressionModels
-                .RIDGE_REGRESSION
-            ),
+            models=MODELS,
             feature_sets=FEATURE_SETS,
             aggregations=AGGREGATIONS,
             reductions=REDUCTIONS,
@@ -243,7 +452,7 @@ def test_indices_only_proposes_indices_pca() -> None:
             feature_dimensions=(
                 FEATURE_DIMENSIONS
             ),
-            min_inner_train_size=8,
+            min_cv_train_size=8,
         )
     )
 
@@ -266,14 +475,70 @@ def test_indices_only_proposes_indices_pca() -> None:
     )
 
 
+def test_embeddings_only_proposes_embeddings_pca() -> None:
+    """
+    Embedding-only pipelines must not propose an index PCA dimension.
+    """
+
+    trial = DummyTrial(
+        {
+            "feature_set":
+                "embeddings",
+
+            "aggregation":
+                "mean_std",
+
+            "reduction":
+                "pca",
+
+            "model":
+                "RIDGE_REGRESSION",
+
+            "pca_embeddings_components__mean_std":
+                6,
+
+            "ridge_alpha":
+                1.0,
+        }
+    )
+
+    configuration = (
+        suggest_pipeline_configuration(
+            trial=trial,
+            models=MODELS,
+            feature_sets=FEATURE_SETS,
+            aggregations=AGGREGATIONS,
+            reductions=REDUCTIONS,
+            pca_indices_candidates=(
+                PCA_INDICES
+            ),
+            pca_embeddings_candidates=(
+                PCA_EMBEDDINGS
+            ),
+            feature_dimensions=(
+                FEATURE_DIMENSIONS
+            ),
+            min_cv_train_size=8,
+        )
+    )
+
+    assert configuration[
+        "pca_indices_components"
+    ] is None
+
+    assert configuration[
+        "pca_embeddings_components"
+    ] == 6
+
+
 # =============================================================================
 # PCA FEASIBILITY
 # =============================================================================
 
 
-def test_pca_candidates_are_limited_by_inner_training_size() -> None:
+def test_pca_candidates_are_limited_by_cv_training_size() -> None:
     """
-    PCA candidates must be feasible in every inner-training fold.
+    PCA candidates must be feasible in every CV training fold.
 
     With five training observations:
 
@@ -284,13 +549,20 @@ def test_pca_candidates_are_limited_by_inner_training_size() -> None:
         {
             "feature_set":
                 "indices",
+
             "aggregation":
                 "mean",
+
             "reduction":
                 "pca",
+
+            "model":
+                "RIDGE_REGRESSION",
+
             "pca_indices_components__mean":
                 4,
-            "alpha":
+
+            "ridge_alpha":
                 1.0,
         }
     )
@@ -298,10 +570,7 @@ def test_pca_candidates_are_limited_by_inner_training_size() -> None:
     configuration = (
         suggest_pipeline_configuration(
             trial=trial,
-            model=(
-                RegressionModels
-                .RIDGE_REGRESSION
-            ),
+            models=MODELS,
             feature_sets=FEATURE_SETS,
             aggregations=AGGREGATIONS,
             reductions=REDUCTIONS,
@@ -317,7 +586,7 @@ def test_pca_candidates_are_limited_by_inner_training_size() -> None:
             feature_dimensions=(
                 FEATURE_DIMENSIONS
             ),
-            min_inner_train_size=5,
+            min_cv_train_size=5,
         )
     )
 
@@ -340,8 +609,10 @@ def test_pca_candidates_are_limited_by_feature_dimension() -> None:
 
     dimensions = {
         "mean": {
-            "indices": 4,
-            "embeddings": 20,
+            "indices":
+                4,
+            "embeddings":
+                20,
         }
     }
 
@@ -349,23 +620,27 @@ def test_pca_candidates_are_limited_by_feature_dimension() -> None:
         {
             "feature_set":
                 "indices",
+
             "aggregation":
                 "mean",
+
             "reduction":
                 "pca",
+
+            "model":
+                "RIDGE_REGRESSION",
+
             "pca_indices_components__mean":
                 4,
-            "alpha":
+
+            "ridge_alpha":
                 1.0,
         }
     )
 
     suggest_pipeline_configuration(
         trial=trial,
-        model=(
-            RegressionModels
-            .RIDGE_REGRESSION
-        ),
+        models=MODELS,
         feature_sets=(
             "indices",
         ),
@@ -385,7 +660,7 @@ def test_pca_candidates_are_limited_by_feature_dimension() -> None:
             PCA_EMBEDDINGS
         ),
         feature_dimensions=dimensions,
-        min_inner_train_size=20,
+        min_cv_train_size=20,
     )
 
     assert trial.categorical_choices[
@@ -406,17 +681,27 @@ def test_no_feasible_pca_dimension_prunes_trial() -> None:
         {
             "feature_set":
                 "indices",
+
             "aggregation":
                 "mean",
+
             "reduction":
                 "pca",
+
+            "model":
+                "RIDGE_REGRESSION",
+
+            "ridge_alpha":
+                1.0,
         }
     )
 
     dimensions = {
         "mean": {
-            "indices": 3,
-            "embeddings": 10,
+            "indices":
+                3,
+            "embeddings":
+                10,
         }
     }
 
@@ -425,10 +710,7 @@ def test_no_feasible_pca_dimension_prunes_trial() -> None:
     ):
         suggest_pipeline_configuration(
             trial=trial,
-            model=(
-                RegressionModels
-                .RIDGE_REGRESSION
-            ),
+            models=MODELS,
             feature_sets=(
                 "indices",
             ),
@@ -447,7 +729,7 @@ def test_no_feasible_pca_dimension_prunes_trial() -> None:
                 PCA_EMBEDDINGS
             ),
             feature_dimensions=dimensions,
-            min_inner_train_size=4,
+            min_cv_train_size=4,
         )
 
 
@@ -458,22 +740,30 @@ def test_no_feasible_pca_dimension_prunes_trial() -> None:
 
 def test_both_feature_blocks_receive_independent_pca_dimensions() -> None:
     """
-    Indices and embeddings must have independent PCA choices.
+    Indices and embeddings must receive independent PCA choices.
     """
 
     trial = DummyTrial(
         {
             "feature_set":
                 "both",
+
             "aggregation":
                 "mean_std",
+
             "reduction":
                 "pca",
+
+            "model":
+                "RIDGE_REGRESSION",
+
             "pca_indices_components__mean_std":
                 4,
+
             "pca_embeddings_components__mean_std":
                 6,
-            "alpha":
+
+            "ridge_alpha":
                 1.0,
         }
     )
@@ -481,10 +771,7 @@ def test_both_feature_blocks_receive_independent_pca_dimensions() -> None:
     configuration = (
         suggest_pipeline_configuration(
             trial=trial,
-            model=(
-                RegressionModels
-                .RIDGE_REGRESSION
-            ),
+            models=MODELS,
             feature_sets=FEATURE_SETS,
             aggregations=AGGREGATIONS,
             reductions=REDUCTIONS,
@@ -497,7 +784,7 @@ def test_both_feature_blocks_receive_independent_pca_dimensions() -> None:
             feature_dimensions=(
                 FEATURE_DIMENSIONS
             ),
-            min_inner_train_size=8,
+            min_cv_train_size=8,
         )
     )
 
@@ -527,31 +814,35 @@ def test_both_feature_blocks_receive_independent_pca_dimensions() -> None:
 
 def test_pca_parameter_name_depends_on_aggregation() -> None:
     """
-    Different aggregation strategies must use different Optuna parameter
-    names because their feasible PCA spaces may differ.
+    Aggregation strategies use different PCA parameter names because their
+    original feature dimensionalities differ.
     """
 
     trial = DummyTrial(
         {
             "feature_set":
                 "indices",
+
             "aggregation":
                 "hierarchical",
+
             "reduction":
                 "pca",
+
+            "model":
+                "RIDGE_REGRESSION",
+
             "pca_indices_components__hierarchical":
                 4,
-            "alpha":
+
+            "ridge_alpha":
                 1.0,
         }
     )
 
     suggest_pipeline_configuration(
         trial=trial,
-        model=(
-            RegressionModels
-            .RIDGE_REGRESSION
-        ),
+        models=MODELS,
         feature_sets=FEATURE_SETS,
         aggregations=AGGREGATIONS,
         reductions=REDUCTIONS,
@@ -564,7 +855,7 @@ def test_pca_parameter_name_depends_on_aggregation() -> None:
         feature_dimensions=(
             FEATURE_DIMENSIONS
         ),
-        min_inner_train_size=8,
+        min_cv_train_size=8,
     )
 
     assert (
@@ -599,7 +890,7 @@ def test_every_model_family_has_a_search_space(
 ) -> None:
     """
     Every model exposed by RegressionModels must have a corresponding
-    Optuna search space.
+    hyperparameter search space.
     """
 
     trial = DummyTrial()
@@ -617,13 +908,130 @@ def test_every_model_family_has_a_search_space(
     assert params
 
 
-def test_gradient_boosting_searches_supported_losses() -> None:
+# =============================================================================
+# NAMESPACED MODEL PARAMETERS
+# =============================================================================
+
+
+def test_ridge_uses_namespaced_optuna_parameter() -> None:
+    """
+    Ridge must use a model-specific Optuna parameter name while returning
+    the estimator-compatible parameter name.
+    """
 
     trial = DummyTrial(
         {
-            "loss":
+            "ridge_alpha":
+                2.5,
+        }
+    )
+
+    params = suggest_parameters(
+        trial=trial,
+        model=(
+            RegressionModels
+            .RIDGE_REGRESSION
+        ),
+    )
+
+    assert (
+        "ridge_alpha"
+        in trial.suggested_names
+    )
+
+    assert (
+        "alpha"
+        not in trial.suggested_names
+    )
+
+    assert params[
+        "alpha"
+    ] == pytest.approx(
+        2.5
+    )
+
+
+def test_svr_uses_only_svr_hyperparameters() -> None:
+    """
+    Selecting SVR must activate the SVR branch only.
+    """
+
+    trial = DummyTrial(
+        {
+            "svr_c":
+                10.0,
+
+            "svr_epsilon":
+                0.05,
+
+            "svr_gamma":
+                0.01,
+        }
+    )
+
+    params = suggest_parameters(
+        trial=trial,
+        model=RegressionModels.SVR,
+    )
+
+    assert {
+        "svr_c",
+        "svr_epsilon",
+        "svr_gamma",
+    } <= trial.suggested_names
+
+    assert not any(
+        name.startswith(
+            "ridge_"
+        )
+        for name in trial.suggested_names
+    )
+
+    assert not any(
+        name.startswith(
+            "gb_"
+        )
+        for name in trial.suggested_names
+    )
+
+    assert not any(
+        name.startswith(
+            "xgb_"
+        )
+        for name in trial.suggested_names
+    )
+
+    assert params[
+        "C"
+    ] == pytest.approx(
+        10.0
+    )
+
+    assert params[
+        "epsilon"
+    ] == pytest.approx(
+        0.05
+    )
+
+    assert params[
+        "gamma"
+    ] == pytest.approx(
+        0.01
+    )
+
+
+def test_gradient_boosting_searches_supported_losses() -> None:
+    """
+    Gradient Boosting must expose the intended loss functions and conditionally
+    activate Huber alpha.
+    """
+
+    trial = DummyTrial(
+        {
+            "gb_loss":
                 "huber",
-            "huber_alpha":
+
+            "gb_huber_alpha":
                 0.90,
         }
     )
@@ -637,7 +1045,7 @@ def test_gradient_boosting_searches_supported_losses() -> None:
     )
 
     assert trial.categorical_choices[
-        "loss"
+        "gb_loss"
     ] == (
         "squared_error",
         "huber",
@@ -653,3 +1061,209 @@ def test_gradient_boosting_searches_supported_losses() -> None:
     ] == pytest.approx(
         0.90
     )
+
+    assert (
+        "gb_huber_alpha"
+        in trial.suggested_names
+    )
+
+
+def test_gradient_boosting_non_huber_does_not_propose_alpha() -> None:
+    """
+    Huber alpha must not exist when another Gradient Boosting loss is used.
+    """
+
+    trial = DummyTrial(
+        {
+            "gb_loss":
+                "squared_error",
+        }
+    )
+
+    params = suggest_parameters(
+        trial=trial,
+        model=(
+            RegressionModels
+            .GRADIENT_BOOSTING
+        ),
+    )
+
+    assert (
+        "gb_huber_alpha"
+        not in trial.suggested_names
+    )
+
+    assert (
+        "alpha"
+        not in params
+    )
+
+
+def test_xgboost_uses_xgb_namespaced_parameters() -> None:
+    """
+    XGBoost hyperparameters must not share Optuna names with other tree
+    families.
+    """
+
+    trial = DummyTrial()
+
+    params = suggest_parameters(
+        trial=trial,
+        model=(
+            RegressionModels
+            .XGBOOST
+        ),
+    )
+
+    assert (
+        "xgb_max_depth"
+        in trial.suggested_names
+    )
+
+    assert (
+        "xgb_learning_rate"
+        in trial.suggested_names
+    )
+
+    assert (
+        "gb_max_depth"
+        not in trial.suggested_names
+    )
+
+    assert (
+        "rf_max_depth"
+        not in trial.suggested_names
+    )
+
+    assert (
+        "et_max_depth"
+        not in trial.suggested_names
+    )
+
+    assert (
+        "max_depth"
+        in params
+    )
+
+    assert (
+        "learning_rate"
+        in params
+    )
+
+
+# =============================================================================
+# CONDITIONAL PIPELINE BRANCH
+# =============================================================================
+
+
+def test_pipeline_activates_only_selected_model_branch() -> None:
+    """
+    A complete pipeline trial must propose hyperparameters only for the
+    selected model family.
+    """
+
+    trial = DummyTrial(
+        {
+            "feature_set":
+                "embeddings",
+
+            "aggregation":
+                "mean",
+
+            "reduction":
+                "none",
+
+            "model":
+                "SVR",
+
+            "svr_c":
+                5.0,
+
+            "svr_epsilon":
+                0.05,
+
+            "svr_gamma":
+                0.01,
+        }
+    )
+
+    configuration = (
+        suggest_pipeline_configuration(
+            trial=trial,
+            models=MODELS,
+            feature_sets=FEATURE_SETS,
+            aggregations=AGGREGATIONS,
+            reductions=REDUCTIONS,
+            pca_indices_candidates=(
+                PCA_INDICES
+            ),
+            pca_embeddings_candidates=(
+                PCA_EMBEDDINGS
+            ),
+            feature_dimensions=(
+                FEATURE_DIMENSIONS
+            ),
+            min_cv_train_size=8,
+        )
+    )
+
+    assert configuration[
+        "model"
+    ] == RegressionModels.SVR
+
+    assert {
+        "svr_c",
+        "svr_epsilon",
+        "svr_gamma",
+    } <= trial.suggested_names
+
+    forbidden_prefixes = (
+        "ridge_",
+        "elastic_",
+        "rf_",
+        "et_",
+        "gb_",
+        "xgb_",
+    )
+
+    assert not any(
+        name.startswith(
+            forbidden_prefixes
+        )
+        for name in trial.suggested_names
+    )
+
+
+# =============================================================================
+# EMPTY MODEL SPACE
+# =============================================================================
+
+
+def test_empty_model_space_is_rejected() -> None:
+    """
+    A pipeline search without candidate model families is invalid.
+    """
+
+    trial = DummyTrial()
+
+    with pytest.raises(
+        ValueError,
+        match="At least one regression model",
+    ):
+        suggest_pipeline_configuration(
+            trial=trial,
+            models=[],
+            feature_sets=FEATURE_SETS,
+            aggregations=AGGREGATIONS,
+            reductions=REDUCTIONS,
+            pca_indices_candidates=(
+                PCA_INDICES
+            ),
+            pca_embeddings_candidates=(
+                PCA_EMBEDDINGS
+            ),
+            feature_dimensions=(
+                FEATURE_DIMENSIONS
+            ),
+            min_cv_train_size=8,
+        )

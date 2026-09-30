@@ -5,6 +5,7 @@ import shutil
 
 from datetime import datetime
 from logging import Filter
+
 import optuna
 
 from .settings import Settings
@@ -143,12 +144,14 @@ class LogSetup:
         self,
     ) -> None:
         """
-        Write the experiment configuration to the log.
+        Write the complete experiment configuration to the log.
         """
 
         model_names = ", ".join(
             model.name
-            for model in self.settings.model.models
+            for model in (
+                self.settings.model.models
+            )
         )
 
         feature_sets = ", ".join(
@@ -156,25 +159,35 @@ class LogSetup:
         )
 
         aggregations = ", ".join(
-            self.settings.model.aggregation_strategies
+            self.settings
+            .model
+            .aggregation_strategies
         )
 
         reductions = ", ".join(
-            self.settings.model.reduction_methods
+            self.settings
+            .model
+            .reduction_methods
         )
 
         pca_indices = ", ".join(
-            str(value)
+            str(
+                value
+            )
             for value in (
-                self.settings.model
+                self.settings
+                .model
                 .pca_indices_candidates
             )
         )
 
         pca_embeddings = ", ".join(
-            str(value)
+            str(
+                value
+            )
             for value in (
-                self.settings.model
+                self.settings
+                .model
                 .pca_embeddings_candidates
             )
         )
@@ -182,53 +195,64 @@ class LogSetup:
         metadata = [
             "",
             "========== New Experiment ==========",
+
             (
-                f"Timestamp              : "
+                f"Timestamp               : "
                 f"{datetime.now().isoformat()}"
             ),
+
             (
-                f"Output directory       : "
+                f"Output directory        : "
                 f"{self.output_dir}"
             ),
+
             (
-                f"Platform               : "
+                f"Platform                : "
                 f"{platform.system()} "
                 f"{platform.release()}"
             ),
+
             (
-                f"Python version         : "
+                f"Python version          : "
                 f"{platform.python_version()}"
             ),
 
             "",
             "---------- Data ----------",
+
             (
-                f"Dataset                : "
+                f"Dataset                 : "
                 f"{self.settings.data.data_path}"
             ),
+
             (
-                f"Schema                 : "
+                f"Schema                  : "
                 f"{self.settings.data.schema_path}"
             ),
 
             "",
             "---------- Pipeline search space ----------",
+
             (
-                f"Feature sets           : "
+                f"Feature sets            : "
                 f"{feature_sets}"
             ),
+
             (
-                f"Aggregations           : "
+                f"Aggregations            : "
                 f"{aggregations}"
             ),
+
             (
-                f"Reduction methods      : "
+                f"Reduction methods       : "
                 f"{reductions}"
             ),
+
             (
-                f"PCA indices candidates : "
+                f"PCA indices candidates  : "
                 f"{pca_indices}"
             ),
+
             (
                 f"PCA embedding candidates: "
                 f"{pca_embeddings}"
@@ -236,37 +260,92 @@ class LogSetup:
 
             "",
             "---------- Models ----------",
+
             (
-                f"Model families         : "
+                f"Model families          : "
                 f"{model_names}"
             ),
+
             (
-                "Reference baselines    : "
-                "mean, median"
+                "Reference baselines     : "
+                "Point-balanced mean, "
+                "Point-balanced median"
             ),
+
             (
-                f"Random state           : "
+                f"Random state            : "
                 f"{self.settings.model.random_state}"
             ),
 
             "",
-            "---------- Nested CV ----------",
+            "---------- Final holdout ----------",
+
             (
-                f"Outer folds            : "
-                f"{self.settings.validation.outer_splits}"
+                f"Test fraction           : "
+                f"{self.settings.validation.test_size}"
             ),
+
             (
-                f"Outer repeats          : "
-                f"{self.settings.validation.outer_repeats}"
+                "Split grouping unit     : "
+                "Point"
             ),
+
             (
-                f"Inner folds            : "
-                f"{self.settings.validation.inner_splits}"
+                "Final test use          : "
+                "single evaluation after pipeline selection"
             ),
+
+            "",
+            "---------- Model-selection CV ----------",
+
             (
-                f"Optuna trials/family   : "
+                f"CV folds                : "
+                f"{self.settings.validation.cv_splits}"
+            ),
+
+            (
+                f"CV repeats              : "
+                f"{self.settings.validation.cv_repeats}"
+            ),
+
+            (
+                "CV grouping unit        : "
+                "Point"
+            ),
+
+            (
+                "Primary objective       : "
+                "mean repeated OOF Point-balanced MAE"
+            ),
+
+            (
+                "Shared partitions       : "
+                "same CV splits for every Optuna trial"
+            ),
+
+            "",
+            "---------- Optuna ----------",
+
+            (
+                f"Maximum trials          : "
                 f"{self.settings.validation.optuna_trials}"
             ),
+
+            (
+                "Search design           : "
+                "single conditional CASH study"
+            ),
+
+            (
+                "Trial definition        : "
+                "complete pipeline"
+            ),
+
+            (
+                "Performance pruning     : "
+                "disabled"
+            ),
+
             "",
         ]
 
@@ -312,6 +391,7 @@ class LogSetup:
                     handler,
                     logging.FileHandler,
                 ):
+
                     handler.close()
 
                     root_logger.removeHandler(

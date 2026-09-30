@@ -239,10 +239,19 @@ class DataConfig:
 @dataclass
 class ModelConfig:
     """
-    Define the candidate machine-learning pipelines explored during
-    inner cross-validation.
+    Define the complete machine-learning pipeline search space.
 
-    These values define the search space rather than one fixed pipeline.
+    A candidate pipeline may differ in:
+
+        model family
+        feature representation
+        aggregation strategy
+        dimensionality reduction
+        PCA dimensionality
+        model hyperparameters
+
+    Model family is part of the same Optuna search space as the remaining
+    pipeline components.
     """
 
     models_config: str
@@ -580,25 +589,42 @@ class ModelConfig:
 
 
 # =============================================================================
-# VALIDATION
+# VALIDATION AND MODEL SELECTION
 # =============================================================================
 
 
 @dataclass
 class ValidationConfig:
     """
-    Nested grouped cross-validation configuration.
+    Holdout and cross-validation configuration.
 
-    Outer CV estimates the generalization performance of the complete
-    pipeline-selection procedure on unseen Points.
+    Experimental design
+    -------------------
+    1. The complete dataset is split once by Point into:
 
-    Inner CV selects the complete pipeline using only outer-training data.
+           development set
+           final test set
+
+    2. The final test set remains completely isolated during pipeline
+       selection.
+
+    3. Candidate pipelines are compared on the development set using
+       repeated grouped cross-validation.
+
+    4. Every Optuna trial defines one complete pipeline and is evaluated
+       using exactly the same cross-validation partitions.
+
+    5. The primary optimization criterion is the mean Point-balanced
+       out-of-fold MAE across CV repetitions.
+
+    6. After selection, the winning pipeline is fitted using the complete
+       development set and evaluated once on the final test set.
     """
 
-    outer_splits: int
-    outer_repeats: int
+    test_size: float
 
-    inner_splits: int
+    cv_splits: int
+    cv_repeats: int
 
     optuna_trials: int
 
@@ -606,25 +632,9 @@ class ValidationConfig:
         self,
     ) -> None:
 
-        if self.outer_splits < 2:
-            raise ValueError(
-                "OUTER_SPLITS must be >= 2."
-            )
-
-        if self.outer_repeats < 1:
-            raise ValueError(
-                "OUTER_REPEATS must be >= 1."
-            )
-
-        if self.inner_splits < 2:
-            raise ValueError(
-                "INNER_SPLITS must be >= 2."
-            )
-
-        if self.optuna_trials < 1:
-            raise ValueError(
-                "OPTUNA_TRIALS must be >= 1."
-            )
+        self._validate_test_size()
+        self._validate_cv()
+        self._validate_optuna()
 
     @classmethod
     def from_env(
@@ -632,27 +642,76 @@ class ValidationConfig:
     ) -> "ValidationConfig":
 
         return cls(
-            outer_splits=config(
-                "OUTER_SPLITS",
+            test_size=config(
+                "TEST_SIZE",
+                default=0.20,
+                cast=float,
+            ),
+            cv_splits=config(
+                "CV_SPLITS",
                 default=5,
                 cast=int,
             ),
-            outer_repeats=config(
-                "OUTER_REPEATS",
-                default=3,
-                cast=int,
-            ),
-            inner_splits=config(
-                "INNER_SPLITS",
-                default=4,
+            cv_repeats=config(
+                "CV_REPEATS",
+                default=5,
                 cast=int,
             ),
             optuna_trials=config(
                 "OPTUNA_TRIALS",
-                default=60,
+                default=400,
                 cast=int,
             ),
         )
+
+    # =========================================================================
+    # HOLDOUT
+    # =========================================================================
+
+    def _validate_test_size(
+        self,
+    ) -> None:
+
+        if not (
+            0.0
+            < self.test_size
+            < 1.0
+        ):
+            raise ValueError(
+                "TEST_SIZE must be between 0 and 1, "
+                f"got: {self.test_size}"
+            )
+
+    # =========================================================================
+    # CROSS-VALIDATION
+    # =========================================================================
+
+    def _validate_cv(
+        self,
+    ) -> None:
+
+        if self.cv_splits < 2:
+            raise ValueError(
+                "CV_SPLITS must be >= 2."
+            )
+
+        if self.cv_repeats < 1:
+            raise ValueError(
+                "CV_REPEATS must be >= 1."
+            )
+
+    # =========================================================================
+    # OPTUNA
+    # =========================================================================
+
+    def _validate_optuna(
+        self,
+    ) -> None:
+
+        if self.optuna_trials < 1:
+            raise ValueError(
+                "OPTUNA_TRIALS must be >= 1."
+            )
 
 
 # =============================================================================

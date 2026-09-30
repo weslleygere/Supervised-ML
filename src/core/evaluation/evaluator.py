@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+
 from dataclasses import dataclass
 
 import numpy as np
@@ -15,7 +16,9 @@ from sklearn.metrics import (
 from sklearn.model_selection import GroupKFold
 
 from src.core.data.schema import Schema
-from src.core.models.definitions import ModelConvergenceError
+from src.core.models.definitions import (
+    ModelConvergenceError,
+)
 from src.core.models.factory import (
     ModelFactory,
     RegressionModels,
@@ -23,7 +26,9 @@ from src.core.models.factory import (
 from src.core.models.search_space import (
     suggest_pipeline_configuration,
 )
-from src.core.processors.postsplit import PostSplitProcessor
+from src.core.processors.postsplit import (
+    PostSplitProcessor,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -42,19 +47,22 @@ class RegressionMetrics:
 
 
 @dataclass(frozen=True)
-class InnerSplit:
+class CVSplit:
+    """
+    One grouped train/validation partition.
+
+    CapturePointIds are stored explicitly, while grouping independence is
+    enforced at the Point level.
+    """
+
+    repeat: int
+    fold: int
+
     train_bags: tuple
     validation_bags: tuple
 
-
-@dataclass
-class PreparedInnerFold:
-    df_validation: pd.DataFrame
-    X_train: pd.DataFrame
-    y_train: pd.DataFrame
-    X_validation: pd.DataFrame
-    weights: np.ndarray
-    processor: PostSplitProcessor
+    n_train_points: int
+    n_validation_points: int
 
 
 # =============================================================================
@@ -64,39 +72,42 @@ class PreparedInnerFold:
 
 class ModelEvaluator:
     """
-    Nested grouped cross-validation for complete ML-pipeline selection.
+    Select and independently evaluate one complete ML pipeline.
 
-    Selection hierarchy
+    Experimental design
     -------------------
-    For each outer fold:
+    1. Split independent Points once into development and final test sets.
 
-        outer training Points
-            ->
-        inner grouped CV
-            ->
-        optimize each model family independently
-            ->
-        compare each family's best inner-CV MAE
-            ->
-        select one complete pipeline
-            ->
-        refit on all outer-training data
-            ->
-        evaluate once on outer-test Points
+    2. Keep the final test set completely isolated during pipeline selection.
 
-    The complete pipeline includes:
+    3. Precompute repeated grouped cross-validation partitions using only
+       development Points.
 
-        model family
-        feature set
-        aggregation strategy
-        dimensionality reduction
-        PCA dimensionality
-        model hyperparameters
+    4. Run one conditional Optuna CASH study.
 
-    Mean and median predictors are evaluated as training-only baselines
-    but never participate in pipeline selection.
+       Every trial jointly defines:
 
-    All train/test splitting is grouped by Point.
+           feature representation
+           acoustic aggregation
+           dimensionality reduction
+           PCA dimensionality
+           model family
+           model hyperparameters
+
+    5. Evaluate every candidate using exactly the same repeated CV
+       partitions.
+
+    6. For each CV repetition, pool all out-of-fold predictions and calculate
+       Point-balanced regression metrics.
+
+    7. Select the pipeline with the lowest mean repeated OOF MAE.
+
+    8. Fit the selected pipeline on the complete development set.
+
+    9. Evaluate it once on the isolated final test set.
+
+    10. Save article-oriented scientific outputs together with the manifests
+        required for reproducibility.
     """
 
     def __init__(
@@ -110,21 +121,33 @@ class ModelEvaluator:
         reductions: tuple[str, ...],
         pca_indices_candidates: tuple[int, ...],
         pca_embeddings_candidates: tuple[int, ...],
-        outer_splits: int,
-        outer_repeats: int,
-        inner_splits: int,
+        test_size: float,
+        cv_splits: int,
+        cv_repeats: int,
         optuna_trials: int,
     ) -> None:
 
         self.schema = schema
+
         self.output_dir = output_dir
 
         self.models = models
-        self.random_state = random_state
 
-        self.feature_sets = feature_sets
-        self.aggregations = aggregations
-        self.reductions = reductions
+        self.random_state = (
+            random_state
+        )
+
+        self.feature_sets = (
+            feature_sets
+        )
+
+        self.aggregations = (
+            aggregations
+        )
+
+        self.reductions = (
+            reductions
+        )
 
         self.pca_indices_candidates = (
             pca_indices_candidates
@@ -134,10 +157,21 @@ class ModelEvaluator:
             pca_embeddings_candidates
         )
 
-        self.outer_splits = outer_splits
-        self.outer_repeats = outer_repeats
-        self.inner_splits = inner_splits
-        self.optuna_trials = optuna_trials
+        self.test_size = (
+            test_size
+        )
+
+        self.cv_splits = (
+            cv_splits
+        )
+
+        self.cv_repeats = (
+            cv_repeats
+        )
+
+        self.optuna_trials = (
+            optuna_trials
+        )
 
     # =========================================================================
     # PUBLIC API
@@ -146,31 +180,24 @@ class ModelEvaluator:
     def evaluate(
         self,
         signatures: dict[str, pd.DataFrame],
-    ) -> None:
+    ) -> dict:
         """
-        Evaluate complete pipeline selection with repeated nested grouped CV.
-
-        Parameters
-        ----------
-        signatures : dict[str, pd.DataFrame]
-            CapturePointId-level representations generated by
-            PreSplitProcessor.process_all().
-
-            Expected structure:
-
-                {
-                    "mean": ...,
-                    "mean_std": ...,
-                    "hierarchical": ...,
-                }
+        Select a complete pipeline on development data and evaluate it once
+        on the independent final test set.
         """
+
+        # =====================================================================
+        # INPUT VALIDATION
+        # =====================================================================
 
         self._check_signature_alignment(
             signatures
         )
 
         reference = signatures[
-            self.aggregations[0]
+            self.aggregations[
+                0
+            ]
         ]
 
         feature_dimensions = (
@@ -180,517 +207,162 @@ class ModelEvaluator:
         )
 
         logger.info(
-            "Starting nested pipeline selection: "
-            "%d CapturePointIds, %d Points, "
-            "%d outer repeats x %d folds",
-            len(reference),
+            "Dataset contains %d CapturePointIds across %d Points",
+            len(
+                reference
+            ),
             reference[
                 self.schema.group
             ].nunique(),
-            self.outer_repeats,
-            self.outer_splits,
-        )
-
-        outer_rows: list[dict] = []
-        candidate_rows: list[dict] = []
-        prediction_rows: list[pd.DataFrame] = []
-
-        # =====================================================================
-        # REPEATED OUTER CV
-        # =====================================================================
-
-        for outer_repeat in range(
-            1,
-            self.outer_repeats + 1,
-        ):
-
-            outer_cv = GroupKFold(
-                n_splits=self.outer_splits,
-                shuffle=True,
-                random_state=self._outer_seed(
-                    outer_repeat
-                ),
-            )
-
-            groups = reference[
-                self.schema.group
-            ].to_numpy()
-
-            for outer_fold, (
-                train_idx,
-                test_idx,
-            ) in enumerate(
-                outer_cv.split(
-                    reference,
-                    groups=groups,
-                ),
-                start=1,
-            ):
-
-                logger.info(
-                    "Outer repeat %d/%d — fold %d/%d",
-                    outer_repeat,
-                    self.outer_repeats,
-                    outer_fold,
-                    self.outer_splits,
-                )
-
-                df_train_reference = (
-                    reference.iloc[
-                        train_idx
-                    ]
-                )
-
-                df_test_reference = (
-                    reference.iloc[
-                        test_idx
-                    ]
-                )
-
-                train_bags = tuple(
-                    df_train_reference[
-                        self.schema.bag
-                    ].tolist()
-                )
-
-                test_bags = tuple(
-                    df_test_reference[
-                        self.schema.bag
-                    ].tolist()
-                )
-
-                # -------------------------------------------------------------
-                # Create inner splits once and reuse them for every model family
-                # and every Optuna trial.
-                # -------------------------------------------------------------
-
-                inner_splits = (
-                    self._make_inner_splits(
-                        df_train_reference,
-                        outer_repeat=outer_repeat,
-                        outer_fold=outer_fold,
-                    )
-                )
-
-                min_inner_train_size = min(
-                    len(
-                        split.train_bags
-                    )
-                    for split in inner_splits
-                )
-
-                # -------------------------------------------------------------
-                # Preprocessing cache is shared across model families.
-                #
-                # If two trials use the same representation configuration,
-                # scaling/PCA need not be fitted again.
-                # -------------------------------------------------------------
-
-                preprocessing_cache: dict[
-                    tuple,
-                    list[PreparedInnerFold],
-                ] = {}
-
-                family_results = []
-
-                # =============================================================
-                # INNER MODEL-FAMILY OPTIMIZATION
-                # =============================================================
-
-                for model_enum in self.models:
-
-                    result = (
-                        self._optimize_family(
-                            model_enum=model_enum,
-                            signatures=signatures,
-                            train_bags=train_bags,
-                            inner_splits=inner_splits,
-                            feature_dimensions=(
-                                feature_dimensions
-                            ),
-                            min_inner_train_size=(
-                                min_inner_train_size
-                            ),
-                            preprocessing_cache=(
-                                preprocessing_cache
-                            ),
-                            outer_repeat=outer_repeat,
-                            outer_fold=outer_fold,
-                        )
-                    )
-
-                    family_results.append(
-                        result
-                    )
-
-                    candidate_rows.append(
-                        {
-                            "outer_repeat":
-                                outer_repeat,
-                            "outer_fold":
-                                outer_fold,
-                            "model":
-                                model_enum.name,
-                            "inner_MAE":
-                                result["inner_mae"],
-                            **self._config_columns(
-                                result["configuration"]
-                            ),
-                        }
-                    )
-
-                # =============================================================
-                # SELECT COMPLETE PIPELINE USING INNER CV ONLY
-                # =============================================================
-
-                selected = min(
-                    family_results,
-                    key=lambda item:
-                    item["inner_mae"],
-                )
-
-                configuration = selected[
-                    "configuration"
-                ]
-
-                logger.info(
-                    "Outer repeat %d fold %d — "
-                    "selected %s — inner MAE %.4f",
-                    outer_repeat,
-                    outer_fold,
-                    configuration[
-                        "model"
-                    ].name,
-                    selected[
-                        "inner_mae"
-                    ],
-                )
-
-                # =============================================================
-                # FIT SELECTED PIPELINE ON ALL OUTER-TRAINING DATA
-                # =============================================================
-
-                (
-                    predictions,
-                    fit_time,
-                    prediction_time,
-                ) = self._fit_selected_pipeline(
-                    signatures=signatures,
-                    train_bags=train_bags,
-                    test_bags=test_bags,
-                    configuration=configuration,
-                )
-
-                # =============================================================
-                # OUTER-TEST METRICS
-                # =============================================================
-
-                test_frame = self._select_bags(
-                    signatures[
-                        configuration[
-                            "aggregation"
-                        ]
-                    ],
-                    test_bags,
-                )
-
-                metrics = self._regression_metrics(
-                    df=test_frame,
-                    predictions=predictions,
-                )
-
-                # =============================================================
-                # TRAINING-ONLY BASELINES
-                # =============================================================
-
-                (
-                    mean_prediction,
-                    median_prediction,
-                ) = self._baseline_values(
-                    df_train_reference
-                )
-
-                mean_predictions = np.full(
-                    len(df_test_reference),
-                    mean_prediction,
-                    dtype=float,
-                )
-
-                median_predictions = np.full(
-                    len(df_test_reference),
-                    median_prediction,
-                    dtype=float,
-                )
-
-                mean_metrics = (
-                    self._regression_metrics(
-                        df=df_test_reference,
-                        predictions=(
-                            mean_predictions
-                        ),
-                    )
-                )
-
-                median_metrics = (
-                    self._regression_metrics(
-                        df=df_test_reference,
-                        predictions=(
-                            median_predictions
-                        ),
-                    )
-                )
-
-                # =============================================================
-                # STORE OUTER-FOLD RESULT
-                # =============================================================
-
-                outer_rows.append(
-                    {
-                        "outer_repeat":
-                            outer_repeat,
-                        "outer_fold":
-                            outer_fold,
-
-                        "selected_inner_MAE":
-                            selected[
-                                "inner_mae"
-                            ],
-
-                        **self._config_columns(
-                            configuration
-                        ),
-
-                        "n_train_points":
-                            df_train_reference[
-                                self.schema.group
-                            ].nunique(),
-
-                        "n_test_points":
-                            df_test_reference[
-                                self.schema.group
-                            ].nunique(),
-
-                        "n_train_captures":
-                            len(
-                                df_train_reference
-                            ),
-
-                        "n_test_captures":
-                            len(
-                                df_test_reference
-                            ),
-
-                        "MAE":
-                            metrics.mae,
-                        "RMSE":
-                            metrics.rmse,
-                        "R2":
-                            metrics.r2,
-
-                        "mean_baseline_MAE":
-                            mean_metrics.mae,
-                        "mean_baseline_RMSE":
-                            mean_metrics.rmse,
-                        "mean_baseline_R2":
-                            mean_metrics.r2,
-
-                        "median_baseline_MAE":
-                            median_metrics.mae,
-                        "median_baseline_RMSE":
-                            median_metrics.rmse,
-                        "median_baseline_R2":
-                            median_metrics.r2,
-
-                        "fit_time":
-                            fit_time,
-                        "prediction_time":
-                            prediction_time,
-                    }
-                )
-
-                # =============================================================
-                # STORE OUTER OOF PREDICTIONS
-                # =============================================================
-
-                prediction_rows.append(
-                    self._oof_dataframe(
-                        df_test=(
-                            df_test_reference
-                        ),
-                        predictions=predictions,
-                        mean_predictions=(
-                            mean_predictions
-                        ),
-                        median_predictions=(
-                            median_predictions
-                        ),
-                        configuration=(
-                            configuration
-                        ),
-                        outer_repeat=(
-                            outer_repeat
-                        ),
-                        outer_fold=(
-                            outer_fold
-                        ),
-                    )
-                )
-
-        # =====================================================================
-        # RESULTS
-        # =====================================================================
-
-        outer_results = pd.DataFrame(
-            outer_rows
-        )
-
-        inner_candidates = pd.DataFrame(
-            candidate_rows
-        )
-
-        oof_predictions = pd.concat(
-            prediction_rows,
-            ignore_index=True,
-        )
-
-        repeat_metrics = (
-            self._repeat_metrics(
-                oof_predictions
-            )
-        )
-
-        summary = self._summarize_results(
-            repeat_metrics
-        )
-
-        selection_frequency = (
-            self._selection_frequency(
-                outer_results
-            )
         )
 
         # =====================================================================
-        # FINAL CONFIGURATION
+        # DEVELOPMENT / FINAL TEST
         # =====================================================================
 
         (
-            final_selection,
-            final_candidates,
-        ) = self._select_final_configuration(
-            signatures=signatures,
-            reference=reference,
-            feature_dimensions=(
-                feature_dimensions
-            ),
-        )
-
-        # =====================================================================
-        # SAVE RAW EXPERIMENT OUTPUTS
-        # =====================================================================
-
-        self._save_results(
-            outer_results=outer_results,
-            inner_candidates=inner_candidates,
-            oof_predictions=oof_predictions,
-            repeat_metrics=repeat_metrics,
-            summary=summary,
-            selection_frequency=(
-                selection_frequency
-            ),
-            final_selection=final_selection,
-            final_candidates=final_candidates,
-        )
-
-    # =========================================================================
-    # INNER SPLITS
-    # =========================================================================
-
-    def _make_inner_splits(
-        self,
-        df: pd.DataFrame,
-        outer_repeat: int,
-        outer_fold: int,
-    ) -> list[InnerSplit]:
-        """
-        Create one fixed set of grouped inner folds.
-
-        The exact same folds are used by all model families and trials.
-        """
-
-        inner_cv = GroupKFold(
-            n_splits=self.inner_splits,
-            shuffle=True,
-            random_state=self._inner_seed(
-                outer_repeat,
-                outer_fold,
-            ),
-        )
-
-        groups = df[
-            self.schema.group
-        ].to_numpy()
-
-        splits = []
-
-        for train_idx, validation_idx in (
-            inner_cv.split(
-                df,
-                groups=groups,
+            development_bags,
+            test_bags,
+            split_manifest,
+        ) = (
+            self._make_development_test_split(
+                reference
             )
+        )
+
+        development_reference = (
+            self._select_bags(
+                reference,
+                development_bags,
+            )
+        )
+
+        test_reference = (
+            self._select_bags(
+                reference,
+                test_bags,
+            )
+        )
+
+        n_development_points = (
+            development_reference[
+                self.schema.group
+            ]
+            .nunique()
+        )
+
+        n_test_points = (
+            test_reference[
+                self.schema.group
+            ]
+            .nunique()
+        )
+
+        if (
+            n_development_points
+            < self.cv_splits
         ):
-
-            splits.append(
-                InnerSplit(
-                    train_bags=tuple(
-                        df.iloc[
-                            train_idx
-                        ][
-                            self.schema.bag
-                        ].tolist()
-                    ),
-                    validation_bags=tuple(
-                        df.iloc[
-                            validation_idx
-                        ][
-                            self.schema.bag
-                        ].tolist()
-                    ),
-                )
+            raise ValueError(
+                "Development set contains fewer Points "
+                "than CV_SPLITS. "
+                f"Development Points: {n_development_points}; "
+                f"CV_SPLITS: {self.cv_splits}."
             )
 
-        return splits
+        logger.info(
+            "Development/test split: "
+            "%d development Points, %d final-test Points",
+            n_development_points,
+            n_test_points,
+        )
 
-    # =========================================================================
-    # MODEL-FAMILY OPTIMIZATION
-    # =========================================================================
+        # =====================================================================
+        # FIXED REPEATED GROUPED CV
+        # =====================================================================
 
-    def _optimize_family(
-        self,
-        model_enum: RegressionModels,
-        signatures: dict[
-            str,
+        cv_splits = (
+            self._make_repeated_cv_splits(
+                development_reference
+            )
+        )
+
+        cv_split_manifest = (
+            self._cv_split_manifest(
+                development_reference,
+                cv_splits,
+            )
+        )
+
+        min_cv_train_size = min(
+            len(
+                split.train_bags
+            )
+            for split in cv_splits
+        )
+
+        min_cv_train_points = min(
+            split.n_train_points
+            for split in cv_splits
+        )
+
+        logger.info(
+            "Model-selection CV: %d repeats x %d folds "
+            "(minimum training set: %d CapturePointIds / %d Points)",
+            self.cv_repeats,
+            self.cv_splits,
+            min_cv_train_size,
+            min_cv_train_points,
+        )
+
+        # =====================================================================
+        # DEVELOPMENT-CV BASELINES
+        # =====================================================================
+
+        baseline_cv = (
+            self._evaluate_cv_baselines(
+                reference=(
+                    development_reference
+                ),
+                cv_splits=cv_splits,
+            )
+        )
+
+        baseline_repeat_metrics = (
+            baseline_cv[
+                "repeat_metrics"
+            ]
+        )
+
+        baseline_oof_predictions = (
+            baseline_cv[
+                "oof_predictions"
+            ]
+        )
+
+        # =====================================================================
+        # OPTUNA STORAGE
+        # =====================================================================
+
+        trial_repeat_rows: list[
+            dict
+        ] = []
+
+        # OOF predictions are retained in memory during the search but only
+        # the final selected trial will be written to disk.
+        trial_oof_predictions: dict[
+            int,
             pd.DataFrame,
-        ],
-        train_bags: tuple,
-        inner_splits: list[InnerSplit],
-        feature_dimensions: dict[
-            str,
-            dict[str, int],
-        ],
-        min_inner_train_size: int,
-        preprocessing_cache: dict,
-        outer_repeat: int,
-        outer_fold: int,
-    ) -> dict:
-        """
-        Optimize one model family using inner grouped CV.
-        """
+        ] = {}
 
-        sampler = optuna.samplers.TPESampler(
-            seed=self._optuna_seed(
-                model_enum=model_enum,
-                outer_repeat=outer_repeat,
-                outer_fold=outer_fold,
+        # =====================================================================
+        # SINGLE CASH STUDY
+        # =====================================================================
+
+        sampler = (
+            optuna.samplers.TPESampler(
+                seed=(
+                    self.random_state
+                ),
             )
         )
 
@@ -702,11 +374,16 @@ class ModelEvaluator:
         def objective(
             trial: optuna.Trial,
         ) -> float:
+            """
+            Evaluate one complete fixed pipeline candidate.
+            """
 
             configuration = (
                 suggest_pipeline_configuration(
                     trial=trial,
-                    model=model_enum,
+                    models=(
+                        self.models
+                    ),
                     feature_sets=(
                         self.feature_sets
                     ),
@@ -725,233 +402,773 @@ class ModelEvaluator:
                     feature_dimensions=(
                         feature_dimensions
                     ),
-                    min_inner_train_size=(
-                        min_inner_train_size
+                    min_cv_train_size=(
+                        min_cv_train_size
                     ),
+                )
+            )
+
+            serializable_configuration = (
+                self._serializable_config(
+                    configuration
                 )
             )
 
             trial.set_user_attr(
                 "configuration",
-                self._serializable_config(
-                    configuration
+                serializable_configuration,
+            )
+
+            raw_feature_count = (
+                self._raw_feature_count(
+                    configuration=(
+                        configuration
+                    ),
+                    feature_dimensions=(
+                        feature_dimensions
+                    ),
+                )
+            )
+
+            model_feature_count = (
+                self._model_feature_count(
+                    configuration=(
+                        configuration
+                    ),
+                    feature_dimensions=(
+                        feature_dimensions
+                    ),
+                )
+            )
+
+            trial.set_user_attr(
+                "raw_feature_count",
+                int(
+                    raw_feature_count
+                ),
+            )
+
+            trial.set_user_attr(
+                "model_feature_count",
+                int(
+                    model_feature_count
+                ),
+            )
+
+            trial.set_user_attr(
+                "min_cv_train_points",
+                int(
+                    min_cv_train_points
                 ),
             )
 
             try:
 
-                return self._inner_cv_score(
-                    signatures=signatures,
-                    configuration=(
-                        configuration
-                    ),
-                    inner_splits=(
-                        inner_splits
-                    ),
-                    preprocessing_cache=(
-                        preprocessing_cache
-                    ),
+                result = (
+                    self._evaluate_configuration(
+                        signatures=(
+                            signatures
+                        ),
+                        configuration=(
+                            configuration
+                        ),
+                        cv_splits=(
+                            cv_splits
+                        ),
+                        trial_number=(
+                            trial.number
+                        ),
+                    )
                 )
 
             except ModelConvergenceError as exc:
 
                 trial.set_user_attr(
-                    "convergence_failure",
-                    str(exc),
+                    "failure_reason",
+                    str(
+                        exc
+                    ),
                 )
 
-                raise optuna.TrialPruned(
-                    str(exc)
-                ) from exc
+                raise
+
+            summary = result[
+                "summary"
+            ]
+
+            for key, attr in (
+                (
+                    "CV_MAE",
+                    "cv_mae",
+                ),
+                (
+                    "CV_MAE_std",
+                    "cv_mae_std",
+                ),
+                (
+                    "CV_RMSE",
+                    "cv_rmse",
+                ),
+                (
+                    "CV_RMSE_std",
+                    "cv_rmse_std",
+                ),
+                (
+                    "CV_R2",
+                    "cv_r2",
+                ),
+                (
+                    "CV_R2_std",
+                    "cv_r2_std",
+                ),
+                (
+                    "mean_fit_time",
+                    "mean_fit_time",
+                ),
+                (
+                    "mean_prediction_time",
+                    "mean_prediction_time",
+                ),
+            ):
+
+                trial.set_user_attr(
+                    attr,
+                    float(
+                        summary[
+                            key
+                        ]
+                    ),
+                )
+
+            trial_repeat_rows.extend(
+                result[
+                    "repeat_metrics"
+                ]
+            )
+
+            trial_oof_predictions[
+                trial.number
+            ] = result[
+                "oof_predictions"
+            ]
+
+            logger.info(
+                "Trial %d complete — %s — "
+                "features=%s, aggregation=%s, reduction=%s — "
+                "CV MAE %.4f",
+                trial.number,
+                configuration[
+                    "model"
+                ].name,
+                configuration[
+                    "feature_set"
+                ],
+                configuration[
+                    "aggregation"
+                ],
+                configuration[
+                    "reduction"
+                ],
+                summary[
+                    "CV_MAE"
+                ],
+            )
+
+            return float(
+                summary[
+                    "CV_MAE"
+                ]
+            )
+
+        logger.info(
+            "Starting Optuna complete-pipeline search: %d trials",
+            self.optuna_trials,
+        )
 
         study.optimize(
             objective,
-            n_trials=self.optuna_trials,
+            n_trials=(
+                self.optuna_trials
+            ),
             n_jobs=1,
             show_progress_bar=False,
+            catch=(
+                ModelConvergenceError,
+            ),
         )
 
-        completed = [
+        # =====================================================================
+        # BEST TRIAL
+        # =====================================================================
+
+        completed_trials = [
             trial
             for trial in study.trials
-            if trial.state
-            == optuna.trial.TrialState.COMPLETE
+            if (
+                trial.state
+                == optuna.trial.TrialState.COMPLETE
+            )
         ]
 
-        if not completed:
-
+        if not completed_trials:
             raise RuntimeError(
-                f"{model_enum.name}: no completed "
-                "Optuna trials."
+                "No Optuna trial completed successfully."
             )
 
-        stored = dict(
-            study.best_trial.user_attrs[
-                "configuration"
+        best_trial = (
+            study.best_trial
+        )
+
+        best_configuration = (
+            self._configuration_from_serialized(
+                best_trial.user_attrs[
+                    "configuration"
+                ]
+            )
+        )
+
+        logger.info(
+            "Selected trial %d — %s — CV MAE %.4f",
+            best_trial.number,
+            best_configuration[
+                "model"
+            ].name,
+            best_trial.value,
+        )
+
+        # =====================================================================
+        # COMPLETE TRIAL TABLE
+        # =====================================================================
+
+        trial_repeat_metrics = (
+            pd.DataFrame(
+                trial_repeat_rows
+            )
+        )
+
+        model_selection_trials = (
+            self._build_model_selection_trials(
+                study=(
+                    study
+                ),
+                repeat_metrics=(
+                    trial_repeat_metrics
+                ),
+            )
+        )
+
+        # =====================================================================
+        # SELECTED PIPELINE OOF RESULTS
+        # =====================================================================
+
+        selected_repeat_metrics = (
+            trial_repeat_metrics[
+                trial_repeat_metrics[
+                    "trial"
+                ]
+                == best_trial.number
+            ]
+            .copy()
+        )
+
+        selected_model_oof = (
+            trial_oof_predictions[
+                best_trial.number
+            ]
+            .copy()
+        )
+
+        selected_cv_predictions = (
+            self._build_selected_cv_predictions(
+                selected_model_oof=(
+                    selected_model_oof
+                ),
+                baseline_oof=(
+                    baseline_oof_predictions
+                ),
+            )
+        )
+
+        # =====================================================================
+        # FINAL FIT
+        # =====================================================================
+
+        final_result = (
+            self._fit_final_pipeline(
+                signatures=(
+                    signatures
+                ),
+                development_bags=(
+                    development_bags
+                ),
+                test_bags=(
+                    test_bags
+                ),
+                configuration=(
+                    best_configuration
+                ),
+            )
+        )
+
+        selected_test_metrics = (
+            final_result[
+                "metrics"
             ]
         )
 
-        stored[
-            "model"
-        ] = model_enum
+        # =====================================================================
+        # FINAL-TEST BASELINES
+        # =====================================================================
 
-        logger.info(
-            "%s — best inner MAE %.4f",
-            model_enum.name,
-            study.best_value,
+        (
+            mean_baseline,
+            median_baseline,
+        ) = (
+            self._baseline_values(
+                development_reference
+            )
         )
 
-        return {
-            "configuration":
-                stored,
-            "inner_mae":
-                float(
-                    study.best_value
+        mean_predictions = np.full(
+            len(
+                test_reference
+            ),
+            mean_baseline,
+            dtype=float,
+        )
+
+        median_predictions = np.full(
+            len(
+                test_reference
+            ),
+            median_baseline,
+            dtype=float,
+        )
+
+        mean_test_metrics = (
+            self._regression_metrics(
+                df=(
+                    test_reference
+                ),
+                predictions=(
+                    mean_predictions
+                ),
+            )
+        )
+
+        median_test_metrics = (
+            self._regression_metrics(
+                df=(
+                    test_reference
+                ),
+                predictions=(
+                    median_predictions
+                ),
+            )
+        )
+
+        final_test_predictions = (
+            self._build_final_test_predictions(
+                model_predictions=(
+                    final_result[
+                        "predictions"
+                    ]
+                ),
+                mean_baseline=(
+                    mean_baseline
+                ),
+                median_baseline=(
+                    median_baseline
+                ),
+            )
+        )
+
+        # =====================================================================
+        # PERFORMANCE SUMMARY
+        # =====================================================================
+
+        performance_summary = (
+            self._build_performance_summary(
+                selected_repeat_metrics=(
+                    selected_repeat_metrics
+                ),
+                baseline_repeat_metrics=(
+                    baseline_repeat_metrics
+                ),
+                selected_test_metrics=(
+                    selected_test_metrics
+                ),
+                mean_test_metrics=(
+                    mean_test_metrics
+                ),
+                median_test_metrics=(
+                    median_test_metrics
+                ),
+                development_reference=(
+                    development_reference
+                ),
+                test_reference=(
+                    test_reference
+                ),
+            )
+        )
+
+        # =====================================================================
+        # SELECTED PIPELINE
+        # =====================================================================
+
+        selected_pipeline = {
+            "selected_trial":
+                int(
+                    best_trial.number
+                ),
+
+            "pipeline":
+                self._serializable_config(
+                    best_configuration
                 ),
         }
 
+        # =====================================================================
+        # SAVE SCIENTIFIC OUTPUTS
+        # =====================================================================
+
+        self._save_results(
+            performance_summary=(
+                performance_summary
+            ),
+            model_selection_trials=(
+                model_selection_trials
+            ),
+            selected_cv_predictions=(
+                selected_cv_predictions
+            ),
+            final_test_predictions=(
+                final_test_predictions
+            ),
+            selected_pipeline=(
+                selected_pipeline
+            ),
+            split_manifest=(
+                split_manifest
+            ),
+            cv_split_manifest=(
+                cv_split_manifest
+            ),
+        )
+
+        logger.info(
+            "Final independent test performance — "
+            "MAE %.4f, RMSE %.4f, R2 %.4f",
+            selected_test_metrics.mae,
+            selected_test_metrics.rmse,
+            selected_test_metrics.r2,
+        )
+
+        return {
+            "study":
+                study,
+
+            "best_configuration":
+                best_configuration,
+
+            "selected_pipeline":
+                selected_pipeline,
+
+            # Retained as a compatibility alias for existing tests/code.
+            "final_selection":
+                selected_pipeline,
+
+            "performance_summary":
+                performance_summary,
+        }
+
     # =========================================================================
-    # INNER CV SCORE
+    # DEVELOPMENT / TEST SPLIT
     # =========================================================================
 
-    def _inner_cv_score(
+    def _make_development_test_split(
         self,
-        signatures: dict[
-            str,
-            pd.DataFrame,
-        ],
-        configuration: dict,
-        inner_splits: list[InnerSplit],
-        preprocessing_cache: dict,
-    ) -> float:
+        reference: pd.DataFrame,
+    ) -> tuple[
+        tuple,
+        tuple,
+        pd.DataFrame,
+    ]:
         """
-        Evaluate one complete configuration using pooled inner OOF
-        predictions.
+        Split physical Points once into development and final-test sets.
+
+        TEST_SIZE is applied to the number of independent Points.
+
+        The split is deterministic for a fixed RANDOM_STATE.
         """
 
-        cache_key = (
-            configuration[
-                "aggregation"
-            ],
-            configuration[
-                "feature_set"
-            ],
-            configuration[
-                "reduction"
-            ],
-            configuration[
-                "pca_indices_components"
-            ],
-            configuration[
-                "pca_embeddings_components"
-            ],
-        )
-
-        if cache_key not in preprocessing_cache:
-
-            preprocessing_cache[
-                cache_key
-            ] = self._prepare_inner_folds(
-                signatures=signatures,
-                configuration=(
-                    configuration
-                ),
-                inner_splits=(
-                    inner_splits
-                ),
-            )
-
-        prepared_folds = (
-            preprocessing_cache[
-                cache_key
-            ]
-        )
-
-        prediction_frames = []
-
-        for fold in prepared_folds:
-
-            model = (
-                ModelFactory.create_model(
-                    configuration[
-                        "model"
-                    ],
-                    params=configuration[
-                        "model_params"
-                    ],
-                )
-            )
-
-            model.fit(
-                fold.X_train,
-                fold.y_train,
-                sample_weight=(
-                    fold.weights
-                ),
-            )
-
-            y_pred, _ = model.predict(
-                fold.X_validation
-            )
-
-            y_pred = (
-                fold.processor
-                .inverse_transform_target(
-                    y_pred
-                )
-            )
-
-            result = (
-                fold.df_validation[
-                    [
-                        self.schema.group,
-                        self.schema.bag,
-                        self.schema.target,
-                    ]
+        points = np.array(
+            sorted(
+                reference[
+                    self.schema.group
                 ]
-                .copy()
-            )
-
-            result[
-                "prediction"
-            ] = y_pred[
-                self.schema.target
-            ].to_numpy()
-
-            prediction_frames.append(
-                result
-            )
-
-        oof = pd.concat(
-            prediction_frames,
-            ignore_index=True,
+                .drop_duplicates()
+                .tolist(),
+                key=str,
+            ),
+            dtype=object,
         )
 
-        metrics = self._regression_metrics(
-            df=oof,
-            predictions=oof[
-                "prediction"
-            ].to_numpy(),
+        n_points = len(
+            points
         )
 
-        return metrics.mae
+        if n_points < 2:
+            raise ValueError(
+                "At least two independent Points are required."
+            )
+
+        n_test_points = int(
+            round(
+                n_points
+                * self.test_size
+            )
+        )
+
+        n_test_points = max(
+            1,
+            n_test_points,
+        )
+
+        if (
+            n_test_points
+            >= n_points
+        ):
+            raise ValueError(
+                "TEST_SIZE leaves no Points for development."
+            )
+
+        rng = np.random.default_rng(
+            self.random_state
+        )
+
+        shuffled_points = (
+            rng.permutation(
+                points
+            )
+        )
+
+        test_points = set(
+            shuffled_points[
+                :n_test_points
+            ].tolist()
+        )
+
+        development_points = set(
+            shuffled_points[
+                n_test_points:
+            ].tolist()
+        )
+
+        development = reference[
+            reference[
+                self.schema.group
+            ].isin(
+                development_points
+            )
+        ]
+
+        test = reference[
+            reference[
+                self.schema.group
+            ].isin(
+                test_points
+            )
+        ]
+
+        development_bags = tuple(
+            development[
+                self.schema.bag
+            ].tolist()
+        )
+
+        test_bags = tuple(
+            test[
+                self.schema.bag
+            ].tolist()
+        )
+
+        manifest = reference[
+            [
+                self.schema.group,
+                self.schema.bag,
+                self.schema.target,
+            ]
+        ].copy()
+
+        manifest[
+            "split"
+        ] = np.where(
+            manifest[
+                self.schema.group
+            ].isin(
+                test_points
+            ),
+            "test",
+            "development",
+        )
+
+        manifest = (
+            manifest.sort_values(
+                [
+                    "split",
+                    self.schema.group,
+                    self.schema.bag,
+                ]
+            )
+            .reset_index(
+                drop=True
+            )
+        )
+
+        return (
+            development_bags,
+            test_bags,
+            manifest,
+        )
 
     # =========================================================================
-    # INNER PREPROCESSING
+    # REPEATED GROUPED CV
     # =========================================================================
 
-    def _prepare_inner_folds(
+    def _make_repeated_cv_splits(
+        self,
+        development_reference: pd.DataFrame,
+    ) -> list[CVSplit]:
+        """
+        Precompute all repeated grouped CV partitions.
+
+        Every Optuna trial receives these exact same partitions.
+        """
+
+        groups = (
+            development_reference[
+                self.schema.group
+            ]
+            .to_numpy()
+        )
+
+        splits: list[
+            CVSplit
+        ] = []
+
+        for repeat in range(
+            1,
+            self.cv_repeats + 1,
+        ):
+
+            cv = GroupKFold(
+                n_splits=(
+                    self.cv_splits
+                ),
+                shuffle=True,
+                random_state=(
+                    self._cv_seed(
+                        repeat
+                    )
+                ),
+            )
+
+            for fold, (
+                train_idx,
+                validation_idx,
+            ) in enumerate(
+                cv.split(
+                    development_reference,
+                    groups=groups,
+                ),
+                start=1,
+            ):
+
+                train = (
+                    development_reference.iloc[
+                        train_idx
+                    ]
+                )
+
+                validation = (
+                    development_reference.iloc[
+                        validation_idx
+                    ]
+                )
+
+                train_points = set(
+                    train[
+                        self.schema.group
+                    ]
+                )
+
+                validation_points = set(
+                    validation[
+                        self.schema.group
+                    ]
+                )
+
+                if not (
+                    train_points.isdisjoint(
+                        validation_points
+                    )
+                ):
+                    raise RuntimeError(
+                        "Point leakage detected between "
+                        "CV training and validation sets."
+                    )
+
+                splits.append(
+                    CVSplit(
+                        repeat=(
+                            repeat
+                        ),
+                        fold=(
+                            fold
+                        ),
+                        train_bags=tuple(
+                            train[
+                                self.schema.bag
+                            ].tolist()
+                        ),
+                        validation_bags=tuple(
+                            validation[
+                                self.schema.bag
+                            ].tolist()
+                        ),
+                        n_train_points=len(
+                            train_points
+                        ),
+                        n_validation_points=len(
+                            validation_points
+                        ),
+                    )
+                )
+
+        return splits
+
+    # =========================================================================
+    # CANDIDATE EVALUATION
+    # =========================================================================
+
+    def _evaluate_configuration(
         self,
         signatures: dict[
             str,
             pd.DataFrame,
         ],
         configuration: dict,
-        inner_splits: list[InnerSplit],
-    ) -> list[PreparedInnerFold]:
+        cv_splits: list[CVSplit],
+        trial_number: int,
+    ) -> dict:
         """
-        Fit fold-specific preprocessing for one representation
-        configuration.
+        Evaluate one fixed complete pipeline across all CV partitions.
+
+        One Point-balanced OOF metric is calculated per repetition.
+
+        The final candidate score is the mean repetition-level OOF MAE.
         """
 
         df = signatures[
@@ -960,124 +1177,343 @@ class ModelEvaluator:
             ]
         ]
 
-        prepared = []
+        repeat_rows = []
 
-        for split in inner_splits:
+        all_oof_frames = []
 
-            df_train = self._select_bags(
-                df,
-                split.train_bags,
-            )
+        fit_times = []
 
-            df_validation = (
-                self._select_bags(
-                    df,
-                    split.validation_bags,
+        prediction_times = []
+
+        for repeat in range(
+            1,
+            self.cv_repeats + 1,
+        ):
+
+            repeat_splits = [
+                split
+                for split in cv_splits
+                if (
+                    split.repeat
+                    == repeat
                 )
-            )
-
-            X_train = df_train.drop(
-                columns=[
-                    self.schema.target
-                ]
-            )
-
-            y_train = df_train[
-                [
-                    self.schema.target
-                ]
             ]
 
-            X_validation = (
-                df_validation.drop(
-                    columns=[
-                        self.schema.target
+            prediction_frames = []
+
+            for split in repeat_splits:
+
+                df_train = (
+                    self._select_bags(
+                        df,
+                        split.train_bags,
+                    )
+                )
+
+                df_validation = (
+                    self._select_bags(
+                        df,
+                        split.validation_bags,
+                    )
+                )
+
+                X_train = (
+                    df_train.drop(
+                        columns=[
+                            self.schema.target
+                        ]
+                    )
+                )
+
+                y_train = (
+                    df_train[
+                        [
+                            self.schema.target
+                        ]
                     ]
                 )
-            )
 
-            processor = (
-                PostSplitProcessor(
-                    schema=self.schema,
-                    feature_set=configuration[
-                        "feature_set"
-                    ],
-                    reduction=configuration[
-                        "reduction"
-                    ],
-                    pca_indices_components=(
-                        configuration[
-                            "pca_indices_components"
+                X_validation = (
+                    df_validation.drop(
+                        columns=[
+                            self.schema.target
                         ]
-                    ),
-                    pca_embeddings_components=(
+                    )
+                )
+
+                # =============================================================
+                # TRAINING-ONLY PREPROCESSING
+                # =============================================================
+
+                processor = (
+                    PostSplitProcessor(
+                        schema=(
+                            self.schema
+                        ),
+                        feature_set=(
+                            configuration[
+                                "feature_set"
+                            ]
+                        ),
+                        reduction=(
+                            configuration[
+                                "reduction"
+                            ]
+                        ),
+                        pca_indices_components=(
+                            configuration[
+                                "pca_indices_components"
+                            ]
+                        ),
+                        pca_embeddings_components=(
+                            configuration[
+                                "pca_embeddings_components"
+                            ]
+                        ),
+                    )
+                )
+
+                (
+                    X_train_processed,
+                    y_train_processed,
+                ) = (
+                    processor.fit_transform(
+                        X_train,
+                        y_train,
+                    )
+                )
+
+                X_validation_processed = (
+                    processor.transform(
+                        X_validation
+                    )
+                )
+
+                # =============================================================
+                # FOLD MODEL
+                # =============================================================
+
+                model = (
+                    ModelFactory.create_model(
                         configuration[
-                            "pca_embeddings_components"
-                        ]
-                    ),
+                            "model"
+                        ],
+                        params=(
+                            configuration[
+                                "model_params"
+                            ]
+                        ),
+                    )
                 )
-            )
 
-            (
-                X_train_processed,
-                y_train_processed,
-            ) = processor.fit_transform(
-                X_train,
-                y_train,
-            )
-
-            X_validation_processed = (
-                processor.transform(
-                    X_validation
-                )
-            )
-
-            prepared.append(
-                PreparedInnerFold(
-                    df_validation=(
-                        df_validation
-                    ),
-                    X_train=(
-                        X_train_processed
-                    ),
-                    y_train=(
-                        y_train_processed
-                    ),
-                    X_validation=(
-                        X_validation_processed
-                    ),
-                    weights=(
+                fit_time = model.fit(
+                    X_train_processed,
+                    y_train_processed,
+                    sample_weight=(
                         self._point_weights(
                             df_train
                         )
                     ),
-                    processor=processor,
+                )
+
+                (
+                    y_pred,
+                    prediction_time,
+                ) = model.predict(
+                    X_validation_processed
+                )
+
+                fit_times.append(
+                    fit_time
+                )
+
+                prediction_times.append(
+                    prediction_time
+                )
+
+                y_pred = (
+                    processor.inverse_transform_target(
+                        y_pred
+                    )
+                )
+
+                result = (
+                    df_validation[
+                        [
+                            self.schema.group,
+                            self.schema.bag,
+                            self.schema.target,
+                        ]
+                    ]
+                    .copy()
+                )
+
+                result[
+                    "prediction"
+                ] = (
+                    y_pred[
+                        self.schema.target
+                    ]
+                    .to_numpy()
+                )
+
+                result[
+                    "trial"
+                ] = trial_number
+
+                result[
+                    "repeat"
+                ] = repeat
+
+                result[
+                    "fold"
+                ] = split.fold
+
+                prediction_frames.append(
+                    result
+                )
+
+            # =================================================================
+            # COMPLETE OOF DATASET FOR ONE REPEAT
+            # =================================================================
+
+            repeat_oof = pd.concat(
+                prediction_frames,
+                ignore_index=True,
+            )
+
+            repeat_metrics = (
+                self._regression_metrics(
+                    df=(
+                        repeat_oof
+                    ),
+                    predictions=(
+                        repeat_oof[
+                            "prediction"
+                        ]
+                        .to_numpy()
+                    ),
                 )
             )
 
-        return prepared
+            repeat_rows.append(
+                {
+                    "trial":
+                        trial_number,
+
+                    "repeat":
+                        repeat,
+
+                    "MAE":
+                        repeat_metrics.mae,
+
+                    "RMSE":
+                        repeat_metrics.rmse,
+
+                    "R2":
+                        repeat_metrics.r2,
+                }
+            )
+
+            all_oof_frames.append(
+                repeat_oof
+            )
+
+        repeat_metrics_df = (
+            pd.DataFrame(
+                repeat_rows
+            )
+        )
+
+        summary = {
+            "CV_MAE":
+                float(
+                    repeat_metrics_df[
+                        "MAE"
+                    ].mean()
+                ),
+
+            "CV_MAE_std":
+                self._sample_sd(
+                    repeat_metrics_df[
+                        "MAE"
+                    ]
+                ),
+
+            "CV_RMSE":
+                float(
+                    repeat_metrics_df[
+                        "RMSE"
+                    ].mean()
+                ),
+
+            "CV_RMSE_std":
+                self._sample_sd(
+                    repeat_metrics_df[
+                        "RMSE"
+                    ]
+                ),
+
+            "CV_R2":
+                float(
+                    repeat_metrics_df[
+                        "R2"
+                    ].mean()
+                ),
+
+            "CV_R2_std":
+                self._sample_sd(
+                    repeat_metrics_df[
+                        "R2"
+                    ]
+                ),
+
+            "mean_fit_time":
+                float(
+                    np.mean(
+                        fit_times
+                    )
+                ),
+
+            "mean_prediction_time":
+                float(
+                    np.mean(
+                        prediction_times
+                    )
+                ),
+        }
+
+        return {
+            "summary":
+                summary,
+
+            "repeat_metrics":
+                repeat_rows,
+
+            "oof_predictions":
+                pd.concat(
+                    all_oof_frames,
+                    ignore_index=True,
+                ),
+        }
 
     # =========================================================================
-    # OUTER-FOLD FINAL FIT
+    # FINAL PIPELINE FIT
     # =========================================================================
 
-    def _fit_selected_pipeline(
+    def _fit_final_pipeline(
         self,
         signatures: dict[
             str,
             pd.DataFrame,
         ],
-        train_bags: tuple,
+        development_bags: tuple,
         test_bags: tuple,
         configuration: dict,
-    ) -> tuple[
-        np.ndarray,
-        float,
-        float,
-    ]:
+    ) -> dict:
         """
-        Fit one selected complete pipeline on all outer-training data and
-        predict the corresponding outer-test data.
+        Fit the selected pipeline using all development data and evaluate it
+        once on the isolated final test set.
         """
 
         df = signatures[
@@ -1086,60 +1522,80 @@ class ModelEvaluator:
             ]
         ]
 
-        df_train = self._select_bags(
-            df,
-            train_bags,
+        df_development = (
+            self._select_bags(
+                df,
+                development_bags,
+            )
         )
 
-        df_test = self._select_bags(
-            df,
-            test_bags,
+        df_test = (
+            self._select_bags(
+                df,
+                test_bags,
+            )
         )
 
-        X_train = df_train.drop(
-            columns=[
-                self.schema.target
-            ]
-        )
-
-        y_train = df_train[
-            [
-                self.schema.target
-            ]
-        ]
-
-        X_test = df_test.drop(
-            columns=[
-                self.schema.target
-            ]
-        )
-
-        processor = PostSplitProcessor(
-            schema=self.schema,
-            feature_set=configuration[
-                "feature_set"
-            ],
-            reduction=configuration[
-                "reduction"
-            ],
-            pca_indices_components=(
-                configuration[
-                    "pca_indices_components"
+        X_development = (
+            df_development.drop(
+                columns=[
+                    self.schema.target
                 ]
-            ),
-            pca_embeddings_components=(
-                configuration[
-                    "pca_embeddings_components"
+            )
+        )
+
+        y_development = (
+            df_development[
+                [
+                    self.schema.target
                 ]
-            ),
+            ]
+        )
+
+        X_test = (
+            df_test.drop(
+                columns=[
+                    self.schema.target
+                ]
+            )
+        )
+
+        processor = (
+            PostSplitProcessor(
+                schema=(
+                    self.schema
+                ),
+                feature_set=(
+                    configuration[
+                        "feature_set"
+                    ]
+                ),
+                reduction=(
+                    configuration[
+                        "reduction"
+                    ]
+                ),
+                pca_indices_components=(
+                    configuration[
+                        "pca_indices_components"
+                    ]
+                ),
+                pca_embeddings_components=(
+                    configuration[
+                        "pca_embeddings_components"
+                    ]
+                ),
+            )
         )
 
         (
-            X_train_processed,
-            y_train_processed,
-        ) = processor.fit_transform(
-            X_train,
-            y_train,
+            X_development_processed,
+            y_development_processed,
+        ) = (
+            processor.fit_transform(
+                X_development,
+                y_development,
+            )
         )
 
         X_test_processed = (
@@ -1148,21 +1604,25 @@ class ModelEvaluator:
             )
         )
 
-        model = ModelFactory.create_model(
-            configuration[
-                "model"
-            ],
-            params=configuration[
-                "model_params"
-            ],
+        model = (
+            ModelFactory.create_model(
+                configuration[
+                    "model"
+                ],
+                params=(
+                    configuration[
+                        "model_params"
+                    ]
+                ),
+            )
         )
 
         fit_time = model.fit(
-            X_train_processed,
-            y_train_processed,
+            X_development_processed,
+            y_development_processed,
             sample_weight=(
                 self._point_weights(
-                    df_train
+                    df_development
                 )
             ),
         )
@@ -1180,150 +1640,888 @@ class ModelEvaluator:
             )
         )
 
-        return (
+        predictions = (
+            df_test[
+                [
+                    self.schema.group,
+                    self.schema.bag,
+                    self.schema.target,
+                ]
+            ]
+            .copy()
+        )
+
+        predictions[
+            "prediction"
+        ] = (
             y_pred[
                 self.schema.target
-            ].to_numpy(),
-            fit_time,
-            prediction_time,
+            ]
+            .to_numpy()
         )
 
+        metrics = (
+            self._regression_metrics(
+                df=(
+                    df_test
+                ),
+                predictions=(
+                    predictions[
+                        "prediction"
+                    ]
+                    .to_numpy()
+                ),
+            )
+        )
+
+        return {
+            "predictions":
+                predictions,
+
+            "metrics":
+                metrics,
+
+            "fit_time":
+                float(
+                    fit_time
+                ),
+
+            "prediction_time":
+                float(
+                    prediction_time
+                ),
+        }
+
     # =========================================================================
-    # FINAL DEVELOPMENT-DATA SELECTION
+    # CV BASELINES
     # =========================================================================
 
-    def _select_final_configuration(
+    def _evaluate_cv_baselines(
         self,
-        signatures: dict[
-            str,
-            pd.DataFrame,
-        ],
         reference: pd.DataFrame,
-        feature_dimensions: dict[
-            str,
-            dict[str, int],
-        ],
-    ) -> tuple[dict, pd.DataFrame]:
+        cv_splits: list[CVSplit],
+    ) -> dict:
         """
-        Select the final pipeline configuration using all development data.
-
-        This selection is independent of the outer-CV scores.
-
-        Outer CV estimates the performance of the selection procedure.
-        This inner-CV search determines the configuration that should later
-        be fitted to all available development data.
+        Evaluate training-only Point-balanced mean and median baselines using
+        the same repeated CV partitions as the candidate pipelines.
         """
 
-        logger.info(
-            "Selecting final pipeline on all development data"
-        )
+        repeat_rows = []
 
-        all_bags = tuple(
-            reference[
-                self.schema.bag
-            ].tolist()
-        )
+        all_oof_frames = []
 
-        inner_splits = (
-            self._make_inner_splits(
-                reference,
-                outer_repeat=0,
-                outer_fold=0,
-            )
-        )
+        for repeat in range(
+            1,
+            self.cv_repeats + 1,
+        ):
 
-        min_inner_train_size = min(
-            len(
-                split.train_bags
-            )
-            for split in inner_splits
-        )
+            prediction_frames = []
 
-        preprocessing_cache = {}
+            repeat_splits = [
+                split
+                for split in cv_splits
+                if (
+                    split.repeat
+                    == repeat
+                )
+            ]
 
-        results = []
+            for split in repeat_splits:
 
-        rows = []
+                df_train = (
+                    self._select_bags(
+                        reference,
+                        split.train_bags,
+                    )
+                )
 
-        for model_enum in self.models:
+                df_validation = (
+                    self._select_bags(
+                        reference,
+                        split.validation_bags,
+                    )
+                )
 
-            result = self._optimize_family(
-                model_enum=model_enum,
-                signatures=signatures,
-                train_bags=all_bags,
-                inner_splits=inner_splits,
-                feature_dimensions=(
-                    feature_dimensions
-                ),
-                min_inner_train_size=(
-                    min_inner_train_size
-                ),
-                preprocessing_cache=(
-                    preprocessing_cache
-                ),
-                outer_repeat=0,
-                outer_fold=0,
-            )
+                (
+                    mean_value,
+                    median_value,
+                ) = (
+                    self._baseline_values(
+                        df_train
+                    )
+                )
 
-            results.append(
-                result
-            )
-
-            rows.append(
-                {
-                    "model":
-                        model_enum.name,
-                    "inner_MAE":
-                        result[
-                            "inner_mae"
-                        ],
-                    **self._config_columns(
-                        result[
-                            "configuration"
+                result = (
+                    df_validation[
+                        [
+                            self.schema.group,
+                            self.schema.bag,
+                            self.schema.target,
                         ]
+                    ]
+                    .copy()
+                )
+
+                result[
+                    "mean_baseline_prediction"
+                ] = (
+                    mean_value
+                )
+
+                result[
+                    "median_baseline_prediction"
+                ] = (
+                    median_value
+                )
+
+                result[
+                    "repeat"
+                ] = repeat
+
+                result[
+                    "fold"
+                ] = split.fold
+
+                prediction_frames.append(
+                    result
+                )
+
+            repeat_oof = pd.concat(
+                prediction_frames,
+                ignore_index=True,
+            )
+
+            mean_metrics = (
+                self._regression_metrics(
+                    df=(
+                        repeat_oof
                     ),
+                    predictions=(
+                        repeat_oof[
+                            "mean_baseline_prediction"
+                        ]
+                        .to_numpy()
+                    ),
+                )
+            )
+
+            median_metrics = (
+                self._regression_metrics(
+                    df=(
+                        repeat_oof
+                    ),
+                    predictions=(
+                        repeat_oof[
+                            "median_baseline_prediction"
+                        ]
+                        .to_numpy()
+                    ),
+                )
+            )
+
+            repeat_rows.append(
+                {
+                    "repeat":
+                        repeat,
+
+                    "mean_MAE":
+                        mean_metrics.mae,
+
+                    "mean_RMSE":
+                        mean_metrics.rmse,
+
+                    "mean_R2":
+                        mean_metrics.r2,
+
+                    "median_MAE":
+                        median_metrics.mae,
+
+                    "median_RMSE":
+                        median_metrics.rmse,
+
+                    "median_R2":
+                        median_metrics.r2,
                 }
             )
 
-        selected = min(
-            results,
-            key=lambda item:
-            item["inner_mae"],
+            all_oof_frames.append(
+                repeat_oof
+            )
+
+        return {
+            "repeat_metrics":
+                pd.DataFrame(
+                    repeat_rows
+                ),
+
+            "oof_predictions":
+                pd.concat(
+                    all_oof_frames,
+                    ignore_index=True,
+                ),
+        }
+
+    # =========================================================================
+    # ARTICLE-ORIENTED CV PREDICTIONS
+    # =========================================================================
+
+    def _build_selected_cv_predictions(
+        self,
+        selected_model_oof: pd.DataFrame,
+        baseline_oof: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """
+        Build one analysis-ready table containing OOF predictions from the
+        selected pipeline and both baselines.
+
+        Only the selected pipeline is retained in the final output.
+        """
+
+        keys = [
+            "repeat",
+            "fold",
+            self.schema.group,
+            self.schema.bag,
+            self.schema.target,
+        ]
+
+        model = (
+            selected_model_oof[
+                keys
+                + [
+                    "prediction",
+                ]
+            ]
+            .copy()
         )
 
-        configuration = (
-            selected[
-                "configuration"
+        baseline = (
+            baseline_oof[
+                keys
+                + [
+                    "mean_baseline_prediction",
+                    "median_baseline_prediction",
+                ]
+            ]
+            .copy()
+        )
+
+        result = model.merge(
+            baseline,
+            on=keys,
+            how="inner",
+            validate="one_to_one",
+        )
+
+        result = result.rename(
+            columns={
+                self.schema.target:
+                    "observed_HFI",
+
+                "prediction":
+                    "predicted_HFI",
+            }
+        )
+
+        result = (
+            self._add_prediction_errors(
+                result
+            )
+        )
+
+        result = (
+            result.sort_values(
+                [
+                    "repeat",
+                    "fold",
+                    self.schema.group,
+                    self.schema.bag,
+                ]
+            )
+            .reset_index(
+                drop=True
+            )
+        )
+
+        return result
+
+    # =========================================================================
+    # ARTICLE-ORIENTED FINAL TEST PREDICTIONS
+    # =========================================================================
+
+    def _build_final_test_predictions(
+        self,
+        model_predictions: pd.DataFrame,
+        mean_baseline: float,
+        median_baseline: float,
+    ) -> pd.DataFrame:
+        """
+        Build the final independent-test table used for figures, residual
+        analysis and paired baseline comparisons.
+        """
+
+        result = (
+            model_predictions.copy()
+        )
+
+        result = result.rename(
+            columns={
+                self.schema.target:
+                    "observed_HFI",
+
+                "prediction":
+                    "predicted_HFI",
+            }
+        )
+
+        result[
+            "mean_baseline_prediction"
+        ] = float(
+            mean_baseline
+        )
+
+        result[
+            "median_baseline_prediction"
+        ] = float(
+            median_baseline
+        )
+
+        result = (
+            self._add_prediction_errors(
+                result
+            )
+        )
+
+        result = (
+            result.sort_values(
+                [
+                    self.schema.group,
+                    self.schema.bag,
+                ]
+            )
+            .reset_index(
+                drop=True
+            )
+        )
+
+        return result
+
+    # =========================================================================
+    # PREDICTION ERRORS
+    # =========================================================================
+
+    @staticmethod
+    def _add_prediction_errors(
+        df: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """
+        Add model and baseline residual/error columns.
+
+        Residual is defined as:
+
+            observed - predicted
+        """
+
+        result = (
+            df.copy()
+        )
+
+        result[
+            "residual"
+        ] = (
+            result[
+                "observed_HFI"
+            ]
+            - result[
+                "predicted_HFI"
             ]
         )
 
-        final_selection = {
-            "inner_MAE":
-                selected[
-                    "inner_mae"
-                ],
-            **self._config_columns(
-                configuration
+        result[
+            "absolute_error"
+        ] = (
+            result[
+                "residual"
+            ].abs()
+        )
+
+        result[
+            "squared_error"
+        ] = (
+            result[
+                "residual"
+            ]
+            ** 2
+        )
+
+        for baseline in (
+            "mean",
+            "median",
+        ):
+
+            prediction_col = (
+                f"{baseline}_baseline_prediction"
+            )
+
+            residual_col = (
+                f"{baseline}_baseline_residual"
+            )
+
+            absolute_col = (
+                f"{baseline}_baseline_absolute_error"
+            )
+
+            squared_col = (
+                f"{baseline}_baseline_squared_error"
+            )
+
+            result[
+                residual_col
+            ] = (
+                result[
+                    "observed_HFI"
+                ]
+                - result[
+                    prediction_col
+                ]
+            )
+
+            result[
+                absolute_col
+            ] = (
+                result[
+                    residual_col
+                ]
+                .abs()
+            )
+
+            result[
+                squared_col
+            ] = (
+                result[
+                    residual_col
+                ]
+                ** 2
+            )
+
+        return result
+
+    # =========================================================================
+    # PERFORMANCE SUMMARY
+    # =========================================================================
+
+    def _build_performance_summary(
+        self,
+        selected_repeat_metrics: pd.DataFrame,
+        baseline_repeat_metrics: pd.DataFrame,
+        selected_test_metrics: RegressionMetrics,
+        mean_test_metrics: RegressionMetrics,
+        median_test_metrics: RegressionMetrics,
+        development_reference: pd.DataFrame,
+        test_reference: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """
+        Build the main article-oriented performance table.
+
+        Development CV variability is summarized across complete CV repeats.
+
+        Final-test metrics represent one independent holdout evaluation, so
+        no repeat SD is assigned to those rows.
+        """
+
+        development_points = (
+            development_reference[
+                self.schema.group
+            ]
+            .nunique()
+        )
+
+        development_captures = (
+            development_reference[
+                self.schema.bag
+            ]
+            .nunique()
+        )
+
+        test_points = (
+            test_reference[
+                self.schema.group
+            ]
+            .nunique()
+        )
+
+        test_captures = (
+            test_reference[
+                self.schema.bag
+            ]
+            .nunique()
+        )
+
+        rows = []
+
+        # =====================================================================
+        # DEVELOPMENT CV — SELECTED PIPELINE
+        # =====================================================================
+
+        rows.append(
+            self._summary_row_from_repeats(
+                stage="development_cv",
+                method="selected_pipeline",
+                mae=(
+                    selected_repeat_metrics[
+                        "MAE"
+                    ]
+                ),
+                rmse=(
+                    selected_repeat_metrics[
+                        "RMSE"
+                    ]
+                ),
+                r2=(
+                    selected_repeat_metrics[
+                        "R2"
+                    ]
+                ),
+                n_points=(
+                    development_points
+                ),
+                n_capture_points=(
+                    development_captures
+                ),
+            )
+        )
+
+        # =====================================================================
+        # DEVELOPMENT CV — MEAN BASELINE
+        # =====================================================================
+
+        rows.append(
+            self._summary_row_from_repeats(
+                stage="development_cv",
+                method="mean_baseline",
+                mae=(
+                    baseline_repeat_metrics[
+                        "mean_MAE"
+                    ]
+                ),
+                rmse=(
+                    baseline_repeat_metrics[
+                        "mean_RMSE"
+                    ]
+                ),
+                r2=(
+                    baseline_repeat_metrics[
+                        "mean_R2"
+                    ]
+                ),
+                n_points=(
+                    development_points
+                ),
+                n_capture_points=(
+                    development_captures
+                ),
+            )
+        )
+
+        # =====================================================================
+        # DEVELOPMENT CV — MEDIAN BASELINE
+        # =====================================================================
+
+        rows.append(
+            self._summary_row_from_repeats(
+                stage="development_cv",
+                method="median_baseline",
+                mae=(
+                    baseline_repeat_metrics[
+                        "median_MAE"
+                    ]
+                ),
+                rmse=(
+                    baseline_repeat_metrics[
+                        "median_RMSE"
+                    ]
+                ),
+                r2=(
+                    baseline_repeat_metrics[
+                        "median_R2"
+                    ]
+                ),
+                n_points=(
+                    development_points
+                ),
+                n_capture_points=(
+                    development_captures
+                ),
+            )
+        )
+
+        # =====================================================================
+        # FINAL TEST
+        # =====================================================================
+
+        for method, metrics in (
+            (
+                "selected_pipeline",
+                selected_test_metrics,
             ),
+            (
+                "mean_baseline",
+                mean_test_metrics,
+            ),
+            (
+                "median_baseline",
+                median_test_metrics,
+            ),
+        ):
+
+            rows.append(
+                {
+                    "stage":
+                        "final_test",
+
+                    "method":
+                        method,
+
+                    "MAE":
+                        metrics.mae,
+
+                    "MAE_SD":
+                        np.nan,
+
+                    "RMSE":
+                        metrics.rmse,
+
+                    "RMSE_SD":
+                        np.nan,
+
+                    "R2":
+                        metrics.r2,
+
+                    "R2_SD":
+                        np.nan,
+
+                    "n_points":
+                        test_points,
+
+                    "n_capture_points":
+                        test_captures,
+
+                    "n_repeats":
+                        1,
+                }
+            )
+
+        return pd.DataFrame(
+            rows
+        )
+
+    def _summary_row_from_repeats(
+        self,
+        stage: str,
+        method: str,
+        mae: pd.Series,
+        rmse: pd.Series,
+        r2: pd.Series,
+        n_points: int,
+        n_capture_points: int,
+    ) -> dict:
+        """
+        Summarize complete repeated-CV scores for one method.
+        """
+
+        return {
+            "stage":
+                stage,
+
+            "method":
+                method,
+
+            "MAE":
+                float(
+                    mae.mean()
+                ),
+
+            "MAE_SD":
+                self._sample_sd(
+                    mae
+                ),
+
+            "RMSE":
+                float(
+                    rmse.mean()
+                ),
+
+            "RMSE_SD":
+                self._sample_sd(
+                    rmse
+                ),
+
+            "R2":
+                float(
+                    r2.mean()
+                ),
+
+            "R2_SD":
+                self._sample_sd(
+                    r2
+                ),
+
+            "n_points":
+                int(
+                    n_points
+                ),
+
+            "n_capture_points":
+                int(
+                    n_capture_points
+                ),
+
+            "n_repeats":
+                int(
+                    len(
+                        mae
+                    )
+                ),
         }
 
-        logger.info(
-            "Final selected pipeline: %s — "
-            "inner MAE %.4f",
-            configuration[
-                "model"
-            ].name,
-            selected[
-                "inner_mae"
-            ],
+    @staticmethod
+    def _sample_sd(
+        values: pd.Series,
+    ) -> float:
+        """
+        Sample standard deviation across repeated CV estimates.
+        """
+
+        values = (
+            pd.Series(
+                values
+            )
+            .dropna()
         )
 
-        return (
-            final_selection,
-            pd.DataFrame(
-                rows
-            ),
+        if len(
+            values
+        ) <= 1:
+            return 0.0
+
+        return float(
+            values.std(
+                ddof=1
+            )
         )
+
+    # =========================================================================
+    # MODEL-SELECTION TRIAL TABLE
+    # =========================================================================
+
+    def _build_model_selection_trials(
+        self,
+        study: optuna.Study,
+        repeat_metrics: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """
+        Build one analysis-ready row per Optuna pipeline candidate.
+
+        Repeat-level scores are pivoted into columns so this single CSV
+        contains both:
+
+            pipeline definition
+            repeated-CV performance
+        """
+
+        base = (
+            self._study_results_dataframe(
+                study
+            )
+        )
+
+        if repeat_metrics.empty:
+            return base
+
+        repeat_wide = (
+            repeat_metrics.pivot(
+                index="trial",
+                columns="repeat",
+                values=[
+                    "MAE",
+                    "RMSE",
+                    "R2",
+                ],
+            )
+        )
+
+        repeat_wide.columns = [
+            f"{metric}_repeat_{repeat}"
+            for (
+                metric,
+                repeat,
+            ) in repeat_wide.columns
+        ]
+
+        repeat_wide = (
+            repeat_wide.reset_index()
+        )
+
+        result = base.merge(
+            repeat_wide,
+            on="trial",
+            how="left",
+            validate="one_to_one",
+        )
+
+        # Keep the central scientific columns near the front.
+        preferred = [
+            "trial",
+            "state",
+            "objective",
+            "model",
+            "feature_set",
+            "aggregation",
+            "reduction",
+            "pca_indices_components",
+            "pca_embeddings_components",
+            "model_params",
+            "CV_MAE",
+            "CV_MAE_std",
+            "CV_RMSE",
+            "CV_RMSE_std",
+            "CV_R2",
+            "CV_R2_std",
+            "raw_feature_count",
+            "model_feature_count",
+            "min_cv_train_points",
+            "feature_to_point_ratio",
+            "mean_fit_time",
+            "mean_prediction_time",
+            "duration_seconds",
+            "failure_reason",
+        ]
+
+        repeat_columns = [
+            col
+            for col in result.columns
+            if (
+                "_repeat_"
+                in col
+            )
+        ]
+
+        remaining = [
+            col
+            for col in result.columns
+            if (
+                col not in preferred
+                and col not in repeat_columns
+            )
+        ]
+
+        return result[
+            preferred
+            + sorted(
+                repeat_columns
+            )
+            + remaining
+        ]
 
     # =========================================================================
     # BASELINES
@@ -1332,41 +2530,46 @@ class ModelEvaluator:
     def _baseline_values(
         self,
         df_train: pd.DataFrame,
-    ) -> tuple[float, float]:
+    ) -> tuple[
+        float,
+        float,
+    ]:
         """
-        Calculate training-only Point-balanced constant baselines.
-
-        Mean
-            Weighted training mean.
-
-        Median
-            Weighted training median.
-
-        The median baseline is especially relevant because MAE is the
-        primary optimization metric.
+        Calculate Point-balanced training-only mean and median baselines.
         """
 
-        y = df_train[
-            self.schema.target
-        ].to_numpy(
-            dtype=float
+        y = (
+            df_train[
+                self.schema.target
+            ]
+            .to_numpy(
+                dtype=float
+            )
         )
 
-        weights = self._point_weights(
-            df_train
+        weights = (
+            self._point_weights(
+                df_train
+            )
         )
 
         mean_value = float(
             np.average(
                 y,
-                weights=weights,
+                weights=(
+                    weights
+                ),
             )
         )
 
         median_value = (
             self._weighted_median(
-                values=y,
-                weights=weights,
+                values=(
+                    y
+                ),
+                weights=(
+                    weights
+                ),
             )
         )
 
@@ -1384,20 +2587,28 @@ class ModelEvaluator:
         Weighted median of a one-dimensional array.
         """
 
-        order = np.argsort(
-            values
+        order = (
+            np.argsort(
+                values
+            )
         )
 
-        values = values[
-            order
-        ]
+        values = (
+            values[
+                order
+            ]
+        )
 
-        weights = weights[
-            order
-        ]
+        weights = (
+            weights[
+                order
+            ]
+        )
 
-        cumulative = np.cumsum(
-            weights
+        cumulative = (
+            np.cumsum(
+                weights
+            )
         )
 
         cutoff = (
@@ -1405,10 +2616,12 @@ class ModelEvaluator:
             * weights.sum()
         )
 
-        index = np.searchsorted(
-            cumulative,
-            cutoff,
-            side="left",
+        index = (
+            np.searchsorted(
+                cumulative,
+                cutoff,
+                side="left",
+            )
         )
 
         return float(
@@ -1427,19 +2640,20 @@ class ModelEvaluator:
     ) -> np.ndarray:
         """
         Give every physical Point the same total weight.
-
-        CapturePointIds belonging to the same Point divide that Point's
-        total weight among themselves.
         """
 
         n_captures = (
             df.groupby(
                 self.schema.group
-            )[self.schema.bag]
+            )[
+                self.schema.bag
+            ]
             .transform(
                 "nunique"
             )
-            .to_numpy()
+            .to_numpy(
+                dtype=float
+            )
         )
 
         weights = (
@@ -1453,7 +2667,7 @@ class ModelEvaluator:
         )
 
     # =========================================================================
-    # METRICS
+    # REGRESSION METRICS
     # =========================================================================
 
     def _regression_metrics(
@@ -1465,293 +2679,55 @@ class ModelEvaluator:
         Calculate Point-balanced regression metrics.
         """
 
-        observed = df[
-            self.schema.target
-        ].to_numpy(
-            dtype=float
+        observed = (
+            df[
+                self.schema.target
+            ]
+            .to_numpy(
+                dtype=float
+            )
         )
 
-        weights = self._point_weights(
-            df
+        weights = (
+            self._point_weights(
+                df
+            )
         )
 
         return RegressionMetrics(
-            mae=mean_absolute_error(
-                observed,
-                predictions,
-                sample_weight=weights,
+            mae=float(
+                mean_absolute_error(
+                    observed,
+                    predictions,
+                    sample_weight=(
+                        weights
+                    ),
+                )
             ),
-            rmse=root_mean_squared_error(
-                observed,
-                predictions,
-                sample_weight=weights,
+
+            rmse=float(
+                root_mean_squared_error(
+                    observed,
+                    predictions,
+                    sample_weight=(
+                        weights
+                    ),
+                )
             ),
-            r2=r2_score(
-                observed,
-                predictions,
-                sample_weight=weights,
+
+            r2=float(
+                r2_score(
+                    observed,
+                    predictions,
+                    sample_weight=(
+                        weights
+                    ),
+                )
             ),
         )
 
     # =========================================================================
-    # OOF PREDICTIONS
-    # =========================================================================
-
-    def _oof_dataframe(
-        self,
-        df_test: pd.DataFrame,
-        predictions: np.ndarray,
-        mean_predictions: np.ndarray,
-        median_predictions: np.ndarray,
-        configuration: dict,
-        outer_repeat: int,
-        outer_fold: int,
-    ) -> pd.DataFrame:
-        """
-        Store outer-test predictions for the selected pipeline and baselines.
-        """
-
-        result = df_test[
-            [
-                self.schema.group,
-                self.schema.bag,
-                self.schema.target,
-            ]
-        ].copy()
-
-        result[
-            "prediction"
-        ] = predictions
-
-        result[
-            "mean_baseline_prediction"
-        ] = mean_predictions
-
-        result[
-            "median_baseline_prediction"
-        ] = median_predictions
-
-        result[
-            "outer_repeat"
-        ] = outer_repeat
-
-        result[
-            "outer_fold"
-        ] = outer_fold
-
-        config = self._config_columns(
-            configuration
-        )
-
-        for key, value in config.items():
-            result[
-                key
-            ] = value
-
-        return result
-
-    # =========================================================================
-    # REPEAT-LEVEL METRICS
-    # =========================================================================
-
-    def _repeat_metrics(
-        self,
-        oof_predictions: pd.DataFrame,
-    ) -> pd.DataFrame:
-        """
-        Calculate one pooled OOF estimate per outer repeat.
-
-        Predictions from different repeats are not treated as independent
-        observations.
-        """
-
-        rows = []
-
-        for repeat, df_repeat in (
-            oof_predictions.groupby(
-                "outer_repeat"
-            )
-        ):
-
-            model_metrics = (
-                self._regression_metrics(
-                    df=df_repeat,
-                    predictions=df_repeat[
-                        "prediction"
-                    ].to_numpy(),
-                )
-            )
-
-            mean_metrics = (
-                self._regression_metrics(
-                    df=df_repeat,
-                    predictions=df_repeat[
-                        "mean_baseline_prediction"
-                    ].to_numpy(),
-                )
-            )
-
-            median_metrics = (
-                self._regression_metrics(
-                    df=df_repeat,
-                    predictions=df_repeat[
-                        "median_baseline_prediction"
-                    ].to_numpy(),
-                )
-            )
-
-            rows.append(
-                {
-                    "outer_repeat":
-                        repeat,
-
-                    "MAE":
-                        model_metrics.mae,
-                    "RMSE":
-                        model_metrics.rmse,
-                    "R2":
-                        model_metrics.r2,
-
-                    "mean_baseline_MAE":
-                        mean_metrics.mae,
-                    "mean_baseline_RMSE":
-                        mean_metrics.rmse,
-                    "mean_baseline_R2":
-                        mean_metrics.r2,
-
-                    "median_baseline_MAE":
-                        median_metrics.mae,
-                    "median_baseline_RMSE":
-                        median_metrics.rmse,
-                    "median_baseline_R2":
-                        median_metrics.r2,
-                }
-            )
-
-        return pd.DataFrame(
-            rows
-        )
-
-    # =========================================================================
-    # SUMMARY
-    # =========================================================================
-
-    @staticmethod
-    def _summarize_results(
-        repeat_metrics: pd.DataFrame,
-    ) -> pd.DataFrame:
-        """
-        Summarize repeated outer-CV estimates.
-
-        Repeats, rather than individual fold predictions, are used as the
-        units for the reported mean and standard deviation.
-        """
-
-        metrics = [
-            "MAE",
-            "RMSE",
-            "R2",
-            "mean_baseline_MAE",
-            "mean_baseline_RMSE",
-            "mean_baseline_R2",
-            "median_baseline_MAE",
-            "median_baseline_RMSE",
-            "median_baseline_R2",
-        ]
-
-        summary = {}
-
-        for metric in metrics:
-
-            summary[
-                f"{metric}_mean"
-            ] = (
-                repeat_metrics[
-                    metric
-                ].mean()
-            )
-
-            summary[
-                f"{metric}_std"
-            ] = (
-                repeat_metrics[
-                    metric
-                ].std()
-            )
-
-        return pd.DataFrame(
-            [
-                summary
-            ]
-        )
-
-    # =========================================================================
-    # SELECTION FREQUENCY
-    # =========================================================================
-
-    @staticmethod
-    def _selection_frequency(
-        outer_results: pd.DataFrame,
-    ) -> pd.DataFrame:
-        """
-        Summarize how often major pipeline components were selected.
-
-        This is a stability diagnostic, not a rule for choosing the final
-        pipeline.
-        """
-
-        components = [
-            "model",
-            "feature_set",
-            "aggregation",
-            "reduction",
-            "pca_indices_components",
-            "pca_embeddings_components",
-        ]
-
-        rows = []
-
-        total = len(
-            outer_results
-        )
-
-        for component in components:
-
-            counts = (
-                outer_results[
-                    component
-                ]
-                .value_counts(
-                    dropna=False
-                )
-            )
-
-            for value, count in counts.items():
-
-                rows.append(
-                    {
-                        "component":
-                            component,
-                        "value":
-                            value,
-                        "count":
-                            int(
-                                count
-                            ),
-                        "fraction":
-                            float(
-                                count
-                                / total
-                            ),
-                    }
-                )
-
-        return pd.DataFrame(
-            rows
-        )
-
-    # =========================================================================
-    # FEATURE DIMENSIONS
+    # FEATURE DIMENSIONALITY
     # =========================================================================
 
     def _feature_dimensions(
@@ -1760,14 +2736,22 @@ class ModelEvaluator:
             str,
             pd.DataFrame,
         ],
-    ) -> dict[str, dict[str, int]]:
+    ) -> dict[
+        str,
+        dict[
+            str,
+            int,
+        ],
+    ]:
         """
-        Determine feature dimensionality for each aggregation strategy.
+        Determine raw feature dimensionality for every aggregation.
         """
 
         dimensions = {}
 
-        for aggregation in self.aggregations:
+        for aggregation in (
+            self.aggregations
+        ):
 
             df = signatures[
                 aggregation
@@ -1790,7 +2774,9 @@ class ModelEvaluator:
                     np.asarray(
                         df[
                             self.schema.embedding
-                        ].iloc[0]
+                        ].iloc[
+                            0
+                        ]
                     )
                 )
 
@@ -1799,11 +2785,130 @@ class ModelEvaluator:
             ] = {
                 "indices":
                     index_dimension,
+
                 "embeddings":
                     embedding_dimension,
             }
 
         return dimensions
+
+    def _raw_feature_count(
+        self,
+        configuration: dict,
+        feature_dimensions: dict[
+            str,
+            dict[
+                str,
+                int,
+            ],
+        ],
+    ) -> int:
+        """
+        Number of original features entering preprocessing.
+        """
+
+        dimensions = (
+            feature_dimensions[
+                configuration[
+                    "aggregation"
+                ]
+            ]
+        )
+
+        total = 0
+
+        if configuration[
+            "feature_set"
+        ] in {
+            "indices",
+            "both",
+        }:
+
+            total += (
+                dimensions[
+                    "indices"
+                ]
+            )
+
+        if configuration[
+            "feature_set"
+        ] in {
+            "embeddings",
+            "both",
+        }:
+
+            total += (
+                dimensions[
+                    "embeddings"
+                ]
+            )
+
+        return int(
+            total
+        )
+
+    def _model_feature_count(
+        self,
+        configuration: dict,
+        feature_dimensions: dict[
+            str,
+            dict[
+                str,
+                int,
+            ],
+        ],
+    ) -> int:
+        """
+        Number of features presented to the regression model.
+        """
+
+        if (
+            configuration[
+                "reduction"
+            ]
+            == "none"
+        ):
+
+            return (
+                self._raw_feature_count(
+                    configuration=(
+                        configuration
+                    ),
+                    feature_dimensions=(
+                        feature_dimensions
+                    ),
+                )
+            )
+
+        total = 0
+
+        if configuration[
+            "feature_set"
+        ] in {
+            "indices",
+            "both",
+        }:
+
+            total += int(
+                configuration[
+                    "pca_indices_components"
+                ]
+            )
+
+        if configuration[
+            "feature_set"
+        ] in {
+            "embeddings",
+            "both",
+        }:
+
+            total += int(
+                configuration[
+                    "pca_embeddings_components"
+                ]
+            )
+
+        return total
 
     # =========================================================================
     # SIGNATURE ALIGNMENT
@@ -1817,16 +2922,29 @@ class ModelEvaluator:
         ],
     ) -> None:
         """
-        Ensure all aggregation strategies describe the same CapturePointIds,
-        Points and target values.
-
-        This prevents different aggregation representations from being
-        compared on different observations.
+        Ensure every aggregation describes exactly the same statistical units.
         """
+
+        missing = (
+            set(
+                self.aggregations
+            )
+            - set(
+                signatures
+            )
+        )
+
+        if missing:
+            raise ValueError(
+                "Missing aggregation representations: "
+                f"{sorted(missing)}"
+            )
 
         reference = (
             signatures[
-                self.aggregations[0]
+                self.aggregations[
+                    0
+                ]
             ][
                 [
                     self.schema.bag,
@@ -1842,7 +2960,11 @@ class ModelEvaluator:
             )
         )
 
-        for aggregation in self.aggregations[1:]:
+        for aggregation in (
+            self.aggregations[
+                1:
+            ]
+        ):
 
             current = (
                 signatures[
@@ -1862,14 +2984,14 @@ class ModelEvaluator:
                 )
             )
 
-            if not reference.equals(
-                current
+            if not (
+                reference.equals(
+                    current
+                )
             ):
-
                 raise ValueError(
-                    "Aggregation representations do not "
-                    "contain identical CapturePointIds, "
-                    "Points and targets."
+                    "Aggregation representations do not contain "
+                    "identical CapturePointIds, Points and targets."
                 )
 
     # =========================================================================
@@ -1882,7 +3004,7 @@ class ModelEvaluator:
         bags: tuple,
     ) -> pd.DataFrame:
         """
-        Select CapturePointIds while preserving dataframe row order.
+        Select CapturePointIds while preserving dataframe order.
         """
 
         bag_set = set(
@@ -1901,7 +3023,90 @@ class ModelEvaluator:
         )
 
     # =========================================================================
-    # CONFIGURATION HELPERS
+    # CV MANIFEST
+    # =========================================================================
+
+    def _cv_split_manifest(
+        self,
+        development_reference: pd.DataFrame,
+        cv_splits: list[CVSplit],
+    ) -> pd.DataFrame:
+        """
+        Store every repeated CV assignment for reproducibility.
+        """
+
+        bag_to_point = (
+            development_reference
+            .set_index(
+                self.schema.bag
+            )[
+                self.schema.group
+            ]
+            .to_dict()
+        )
+
+        rows = []
+
+        for split in (
+            cv_splits
+        ):
+
+            for bag in (
+                split.train_bags
+            ):
+
+                rows.append(
+                    {
+                        "repeat":
+                            split.repeat,
+
+                        "fold":
+                            split.fold,
+
+                        self.schema.bag:
+                            bag,
+
+                        self.schema.group:
+                            bag_to_point[
+                                bag
+                            ],
+
+                        "role":
+                            "train",
+                    }
+                )
+
+            for bag in (
+                split.validation_bags
+            ):
+
+                rows.append(
+                    {
+                        "repeat":
+                            split.repeat,
+
+                        "fold":
+                            split.fold,
+
+                        self.schema.bag:
+                            bag,
+
+                        self.schema.group:
+                            bag_to_point[
+                                bag
+                            ],
+
+                        "role":
+                            "validation",
+                    }
+                )
+
+        return pd.DataFrame(
+            rows
+        )
+
+    # =========================================================================
+    # CONFIGURATION SERIALIZATION
     # =========================================================================
 
     @staticmethod
@@ -1909,7 +3114,7 @@ class ModelEvaluator:
         configuration: dict,
     ) -> dict:
         """
-        Convert a pipeline configuration to a JSON-compatible structure.
+        Convert a configuration into a JSON-compatible structure.
         """
 
         result = dict(
@@ -1918,9 +3123,33 @@ class ModelEvaluator:
 
         result[
             "model"
-        ] = configuration[
+        ] = (
+            configuration[
+                "model"
+            ].name
+        )
+
+        return result
+
+    @staticmethod
+    def _configuration_from_serialized(
+        configuration: dict,
+    ) -> dict:
+        """
+        Restore a pipeline configuration stored in Optuna.
+        """
+
+        result = dict(
+            configuration
+        )
+
+        result[
             "model"
-        ].name
+        ] = RegressionModels[
+            result[
+                "model"
+            ]
+        ]
 
         return result
 
@@ -1929,18 +3158,23 @@ class ModelEvaluator:
         configuration: dict,
     ) -> dict:
         """
-        Convert one configuration into flat result-table columns.
+        Flatten one pipeline configuration for CSV output.
         """
 
-        model = configuration[
-            "model"
-        ]
+        model = (
+            configuration[
+                "model"
+            ]
+        )
 
         if isinstance(
             model,
             RegressionModels,
         ):
-            model = model.name
+
+            model = (
+                model.name
+            )
 
         return {
             "model":
@@ -1981,24 +3215,274 @@ class ModelEvaluator:
         }
 
     # =========================================================================
-    # SAVE RESULTS
+    # OPTUNA HISTORY
+    # =========================================================================
+
+    def _study_results_dataframe(
+        self,
+        study: optuna.Study,
+    ) -> pd.DataFrame:
+        """
+        Convert the complete Optuna history into one row per candidate.
+        """
+
+        rows = []
+
+        for trial in (
+            study.trials
+        ):
+
+            row = {
+                "trial":
+                    trial.number,
+
+                "state":
+                    trial.state.name,
+
+                "objective":
+                    (
+                        float(
+                            trial.value
+                        )
+                        if (
+                            trial.value
+                            is not None
+                        )
+                        else np.nan
+                    ),
+            }
+
+            configuration = (
+                trial.user_attrs.get(
+                    "configuration"
+                )
+            )
+
+            if configuration is not None:
+
+                row.update(
+                    self._config_columns(
+                        configuration
+                    )
+                )
+
+            else:
+
+                row.update(
+                    {
+                        "model":
+                            None,
+
+                        "feature_set":
+                            None,
+
+                        "aggregation":
+                            None,
+
+                        "reduction":
+                            None,
+
+                        "pca_indices_components":
+                            None,
+
+                        "pca_embeddings_components":
+                            None,
+
+                        "model_params":
+                            None,
+                    }
+                )
+
+            row[
+                "CV_MAE"
+            ] = (
+                trial.user_attrs.get(
+                    "cv_mae",
+                    np.nan,
+                )
+            )
+
+            row[
+                "CV_MAE_std"
+            ] = (
+                trial.user_attrs.get(
+                    "cv_mae_std",
+                    np.nan,
+                )
+            )
+
+            row[
+                "CV_RMSE"
+            ] = (
+                trial.user_attrs.get(
+                    "cv_rmse",
+                    np.nan,
+                )
+            )
+
+            row[
+                "CV_RMSE_std"
+            ] = (
+                trial.user_attrs.get(
+                    "cv_rmse_std",
+                    np.nan,
+                )
+            )
+
+            row[
+                "CV_R2"
+            ] = (
+                trial.user_attrs.get(
+                    "cv_r2",
+                    np.nan,
+                )
+            )
+
+            row[
+                "CV_R2_std"
+            ] = (
+                trial.user_attrs.get(
+                    "cv_r2_std",
+                    np.nan,
+                )
+            )
+
+            row[
+                "raw_feature_count"
+            ] = (
+                trial.user_attrs.get(
+                    "raw_feature_count",
+                    np.nan,
+                )
+            )
+
+            row[
+                "model_feature_count"
+            ] = (
+                trial.user_attrs.get(
+                    "model_feature_count",
+                    np.nan,
+                )
+            )
+
+            row[
+                "min_cv_train_points"
+            ] = (
+                trial.user_attrs.get(
+                    "min_cv_train_points",
+                    np.nan,
+                )
+            )
+
+            if (
+                pd.notna(
+                    row[
+                        "model_feature_count"
+                    ]
+                )
+                and pd.notna(
+                    row[
+                        "min_cv_train_points"
+                    ]
+                )
+                and (
+                    row[
+                        "min_cv_train_points"
+                    ]
+                    > 0
+                )
+            ):
+
+                row[
+                    "feature_to_point_ratio"
+                ] = (
+                    float(
+                        row[
+                            "model_feature_count"
+                        ]
+                    )
+                    / float(
+                        row[
+                            "min_cv_train_points"
+                        ]
+                    )
+                )
+
+            else:
+
+                row[
+                    "feature_to_point_ratio"
+                ] = np.nan
+
+            row[
+                "mean_fit_time"
+            ] = (
+                trial.user_attrs.get(
+                    "mean_fit_time",
+                    np.nan,
+                )
+            )
+
+            row[
+                "mean_prediction_time"
+            ] = (
+                trial.user_attrs.get(
+                    "mean_prediction_time",
+                    np.nan,
+                )
+            )
+
+            row[
+                "failure_reason"
+            ] = (
+                trial.user_attrs.get(
+                    "failure_reason",
+                    None,
+                )
+            )
+
+            if (
+                trial.duration
+                is not None
+            ):
+
+                row[
+                    "duration_seconds"
+                ] = (
+                    trial.duration
+                    .total_seconds()
+                )
+
+            else:
+
+                row[
+                    "duration_seconds"
+                ] = np.nan
+
+            rows.append(
+                row
+            )
+
+        return pd.DataFrame(
+            rows
+        )
+
+    # =========================================================================
+    # SAVE SCIENTIFIC OUTPUTS
     # =========================================================================
 
     def _save_results(
         self,
-        outer_results: pd.DataFrame,
-        inner_candidates: pd.DataFrame,
-        oof_predictions: pd.DataFrame,
-        repeat_metrics: pd.DataFrame,
-        summary: pd.DataFrame,
-        selection_frequency: pd.DataFrame,
-        final_selection: dict,
-        final_candidates: pd.DataFrame,
+        performance_summary: pd.DataFrame,
+        model_selection_trials: pd.DataFrame,
+        selected_cv_predictions: pd.DataFrame,
+        final_test_predictions: pd.DataFrame,
+        selected_pipeline: dict,
+        split_manifest: pd.DataFrame,
+        cv_split_manifest: pd.DataFrame,
     ) -> None:
         """
-        Save raw model-selection outputs.
-
-        Plotting/reporting is intentionally handled elsewhere.
+        Save article-oriented outputs and reproducibility manifests.
         """
 
         os.makedirs(
@@ -2006,55 +3490,88 @@ class ModelEvaluator:
             exist_ok=True,
         )
 
-        outputs = {
-            "outer_fold_results.csv":
-                outer_results,
-
-            "inner_candidate_results.csv":
-                inner_candidates,
-
-            "oof_predictions.csv":
-                oof_predictions,
-
-            "repeat_metrics.csv":
-                repeat_metrics,
-
-            "eval_summary.csv":
-                summary,
-
-            "selection_frequency.csv":
-                selection_frequency,
-
-            "final_candidate_results.csv":
-                final_candidates,
-        }
-
-        for filename, dataframe in (
-            outputs.items()
-        ):
-
-            dataframe.to_csv(
-                os.path.join(
-                    self.output_dir,
-                    filename,
-                ),
-                index=False,
+        reproducibility_dir = (
+            os.path.join(
+                self.output_dir,
+                "reproducibility",
             )
+        )
+
+        os.makedirs(
+            reproducibility_dir,
+            exist_ok=True,
+        )
+
+        # =====================================================================
+        # SCIENTIFIC RESULTS
+        # =====================================================================
+
+        performance_summary.to_csv(
+            os.path.join(
+                self.output_dir,
+                "performance_summary.csv",
+            ),
+            index=False,
+        )
+
+        model_selection_trials.to_csv(
+            os.path.join(
+                self.output_dir,
+                "model_selection_trials.csv",
+            ),
+            index=False,
+        )
+
+        selected_cv_predictions.to_csv(
+            os.path.join(
+                self.output_dir,
+                "selected_cv_predictions.csv",
+            ),
+            index=False,
+        )
+
+        final_test_predictions.to_csv(
+            os.path.join(
+                self.output_dir,
+                "final_test_predictions.csv",
+            ),
+            index=False,
+        )
 
         with open(
             os.path.join(
                 self.output_dir,
-                "final_selection.json",
+                "selected_pipeline.json",
             ),
             "w",
             encoding="utf-8",
         ) as file:
 
             json.dump(
-                final_selection,
+                selected_pipeline,
                 file,
                 indent=2,
             )
+
+        # =====================================================================
+        # REPRODUCIBILITY
+        # =====================================================================
+
+        split_manifest.to_csv(
+            os.path.join(
+                reproducibility_dir,
+                "data_split.csv",
+            ),
+            index=False,
+        )
+
+        cv_split_manifest.to_csv(
+            os.path.join(
+                reproducibility_dir,
+                "cv_splits.csv",
+            ),
+            index=False,
+        )
 
         logger.info(
             "Evaluation results saved to %s",
@@ -2065,37 +3582,16 @@ class ModelEvaluator:
     # RANDOM SEEDS
     # =========================================================================
 
-    def _outer_seed(
+    def _cv_seed(
         self,
-        outer_repeat: int,
+        repeat: int,
     ) -> int:
-        return (
-            self.random_state
-            + outer_repeat
-        )
+        """
+        Deterministic seed for one CV repetition.
+        """
 
-    def _inner_seed(
-        self,
-        outer_repeat: int,
-        outer_fold: int,
-    ) -> int:
         return (
             self.random_state
             + 1_000
-            + 100 * outer_repeat
-            + outer_fold
-        )
-
-    def _optuna_seed(
-        self,
-        model_enum: RegressionModels,
-        outer_repeat: int,
-        outer_fold: int,
-    ) -> int:
-        return (
-            self.random_state
-            + 40_000
-            + 10_000 * outer_repeat
-            + 100 * outer_fold
-            + model_enum.value
+            + repeat
         )

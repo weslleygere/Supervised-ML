@@ -12,15 +12,19 @@ from src.pipeline import Pipeline
 
 def main() -> None:
     """
-    Run the supervised machine learning pipeline.
+    Run the complete supervised machine-learning experiment.
 
     Steps
     -----
-    1. Configure logging.
-    2. Write experiment metadata.
-    3. Run the pipeline.
-    4. Save the experiment log.
+    1. Configure experiment logging.
+    2. Record the experiment configuration.
+    3. Run pipeline selection and final independent evaluation.
+    4. Save the experiment log in the run output directory.
     """
+
+    # =========================================================================
+    # LOGGING
+    # =========================================================================
 
     logging_setup = LogSetup(
         settings=settings
@@ -28,13 +32,20 @@ def main() -> None:
 
     logging_setup.setup_logging()
 
-    logger = logging.getLogger(__name__)
-
-    logger.info(
-        "Starting pipeline..."
+    logger = logging.getLogger(
+        __name__
     )
 
+    logger.info(
+        "Starting supervised ML experiment..."
+    )
+
+    # =========================================================================
+    # EXPERIMENT
+    # =========================================================================
+
     try:
+
         logging_setup.write_log_metadata()
 
         pipeline = Pipeline(
@@ -44,19 +55,21 @@ def main() -> None:
         pipeline.run()
 
         logger.info(
-            "Evaluation complete. Results saved to %s",
+            "Experiment complete. Results saved to %s",
             settings.data.output_dir,
         )
 
     except Exception:
+
         logger.critical(
-            "Pipeline failed.",
+            "Experiment failed.",
             exc_info=True,
         )
 
         raise
 
     finally:
+
         logging_setup.cleanup()
 
 
