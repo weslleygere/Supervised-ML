@@ -16,32 +16,40 @@ class PostSplitProcessor:
     """
     Apply fold-specific preprocessing.
 
-    Feature representations
-    -----------------------
+    Feature blocks
+    --------------
     indices:
-        StandardScaler -> PCA
+        StandardScaler
+        -> optional PCA
 
     embeddings:
-        StandardScaler -> PCA
+        StandardScaler
+        -> optional PCA
 
     both:
-        StandardScaler(indices) -> PCA_indices
-        +
-        StandardScaler(embeddings) -> PCA_embeddings
+        process indices and embeddings independently,
+        then concatenate the resulting blocks.
 
-    All preprocessing steps are fitted only on the training fold.
+    Target
+    ------
+    HFI is transformed with RobustScaler.
+
+    All scalers and PCA transformations are fitted exclusively on the
+    corresponding training fold.
     """
 
     def __init__(
         self,
         schema: Schema,
         feature_set: str,
-        pca_indices_components: int | None,
-        pca_embeddings_components: int | None,
+        reduction: str,
+        pca_indices_components: int | None = None,
+        pca_embeddings_components: int | None = None,
     ) -> None:
 
         self.schema = schema
         self.feature_set = feature_set
+        self.reduction = reduction
 
         self.pca_indices_components = (
             pca_indices_components
@@ -76,27 +84,25 @@ class PostSplitProcessor:
         Fit preprocessing on the training fold and transform it.
         """
 
-        x_train_transformed = (
+        x_transformed = (
             self._fit_transform_features(
                 x_train
             )
         )
 
-        y_train_transformed = (
-            y_train.copy()
-        )
+        y_transformed = y_train.copy()
 
-        y_train_transformed.loc[
+        y_transformed.loc[
             :, [self.schema.target]
         ] = self.target_scaler.fit_transform(
-            y_train_transformed[
+            y_train[
                 [self.schema.target]
             ]
         )
 
         return (
-            x_train_transformed,
-            y_train_transformed,
+            x_transformed,
+            y_transformed,
         )
 
     # =========================================================================
@@ -105,11 +111,11 @@ class PostSplitProcessor:
 
     def transform(
         self,
-        x_test: pd.DataFrame,
+        x: pd.DataFrame,
     ) -> pd.DataFrame:
         """
-        Transform validation or test data using preprocessing
-        fitted on the corresponding training fold.
+        Transform validation or test data using transformations fitted on
+        the corresponding training fold.
         """
 
         parts: list[pd.DataFrame] = []
@@ -120,7 +126,7 @@ class PostSplitProcessor:
         }:
             parts.append(
                 self._transform_indices(
-                    x_test
+                    x
                 )
             )
 
@@ -130,14 +136,8 @@ class PostSplitProcessor:
         }:
             parts.append(
                 self._transform_embeddings(
-                    x_test
+                    x
                 )
-            )
-
-        if not parts:
-            raise ValueError(
-                f"Invalid feature set: "
-                f"{self.feature_set}"
             )
 
         return pd.concat(
@@ -157,26 +157,29 @@ class PostSplitProcessor:
         Return predictions to the original HFI scale.
         """
 
-        y_pred = y_pred.copy()
+        result = y_pred.copy()
 
-        y_pred.loc[
+        result.loc[
             :, [self.schema.target]
         ] = self.target_scaler.inverse_transform(
-            y_pred[
+            result[
                 [self.schema.target]
             ]
         )
 
-        return y_pred
+        return result
 
     # =========================================================================
-    # FEATURE BLOCKS
+    # FEATURES
     # =========================================================================
 
     def _fit_transform_features(
         self,
         x_train: pd.DataFrame,
     ) -> pd.DataFrame:
+        """
+        Fit and transform the selected feature blocks.
+        """
 
         parts: list[pd.DataFrame] = []
 
@@ -200,12 +203,6 @@ class PostSplitProcessor:
                 )
             )
 
-        if not parts:
-            raise ValueError(
-                f"Invalid feature set: "
-                f"{self.feature_set}"
-            )
-
         return pd.concat(
             parts,
             axis=1,
@@ -220,7 +217,7 @@ class PostSplitProcessor:
         x_train: pd.DataFrame,
     ) -> pd.DataFrame:
         """
-        Standardize aggregated acoustic-index features and apply PCA.
+        Standardize the acoustic-index block and optionally apply PCA.
         """
 
         self.index_cols = (
@@ -228,11 +225,6 @@ class PostSplitProcessor:
                 x_train.columns
             )
         )
-
-        if not self.index_cols:
-            raise ValueError(
-                "No acoustic index columns were found."
-            )
 
         matrix = (
             x_train[
@@ -243,42 +235,38 @@ class PostSplitProcessor:
             )
         )
 
-        matrix = (
-            self.index_scaler.fit_transform(
-                matrix
-            )
+        matrix = self.index_scaler.fit_transform(
+            matrix
         )
 
-        if self.pca_indices_components is not None:
+        if self.reduction == "pca":
 
-            n_components = (
-                self._effective_pca_components(
-                    requested=(
-                        self.pca_indices_components
-                    ),
-                    matrix=matrix,
+            if self.pca_indices_components is None:
+                raise ValueError(
+                    "PCA components were not defined "
+                    "for the indices block."
                 )
-            )
 
             self.index_pca = PCA(
-                n_components=n_components,
+                n_components=(
+                    self.pca_indices_components
+                ),
                 svd_solver="full",
             )
 
-            matrix = (
-                self.index_pca.fit_transform(
-                    matrix
-                )
+            matrix = self.index_pca.fit_transform(
+                matrix
             )
 
             self.processed_index_cols = [
                 f"indices_pc_{i + 1}"
                 for i in range(
-                    n_components
+                    self.pca_indices_components
                 )
             ]
 
         else:
+
             self.processed_index_cols = (
                 self.index_cols.copy()
             )
@@ -291,11 +279,14 @@ class PostSplitProcessor:
 
     def _transform_indices(
         self,
-        x_test: pd.DataFrame,
+        x: pd.DataFrame,
     ) -> pd.DataFrame:
+        """
+        Transform the acoustic-index block.
+        """
 
         matrix = (
-            x_test[
+            x[
                 self.index_cols
             ]
             .to_numpy(
@@ -303,23 +294,19 @@ class PostSplitProcessor:
             )
         )
 
-        matrix = (
-            self.index_scaler.transform(
-                matrix
-            )
+        matrix = self.index_scaler.transform(
+            matrix
         )
 
         if self.index_pca is not None:
-            matrix = (
-                self.index_pca.transform(
-                    matrix
-                )
+            matrix = self.index_pca.transform(
+                matrix
             )
 
         return pd.DataFrame(
             matrix,
             columns=self.processed_index_cols,
-            index=x_test.index,
+            index=x.index,
         )
 
     # =========================================================================
@@ -331,7 +318,7 @@ class PostSplitProcessor:
         x_train: pd.DataFrame,
     ) -> pd.DataFrame:
         """
-        Standardize the aggregated embedding representation and apply PCA.
+        Standardize the embedding block and optionally apply PCA.
         """
 
         matrix = np.stack(
@@ -346,19 +333,18 @@ class PostSplitProcessor:
             )
         )
 
-        if self.pca_embeddings_components is not None:
+        if self.reduction == "pca":
 
-            n_components = (
-                self._effective_pca_components(
-                    requested=(
-                        self.pca_embeddings_components
-                    ),
-                    matrix=matrix,
+            if self.pca_embeddings_components is None:
+                raise ValueError(
+                    "PCA components were not defined "
+                    "for the embedding block."
                 )
-            )
 
             self.embedding_pca = PCA(
-                n_components=n_components,
+                n_components=(
+                    self.pca_embeddings_components
+                ),
                 svd_solver="full",
             )
 
@@ -371,11 +357,12 @@ class PostSplitProcessor:
             self.processed_embedding_cols = [
                 f"embedding_pc_{i + 1}"
                 for i in range(
-                    n_components
+                    self.pca_embeddings_components
                 )
             ]
 
         else:
+
             self.processed_embedding_cols = [
                 f"embedding_{i + 1}"
                 for i in range(
@@ -391,11 +378,14 @@ class PostSplitProcessor:
 
     def _transform_embeddings(
         self,
-        x_test: pd.DataFrame,
+        x: pd.DataFrame,
     ) -> pd.DataFrame:
+        """
+        Transform the embedding block.
+        """
 
         matrix = np.stack(
-            x_test[
+            x[
                 self.schema.embedding
             ].to_numpy()
         )
@@ -407,47 +397,12 @@ class PostSplitProcessor:
         )
 
         if self.embedding_pca is not None:
-            matrix = (
-                self.embedding_pca.transform(
-                    matrix
-                )
+            matrix = self.embedding_pca.transform(
+                matrix
             )
 
         return pd.DataFrame(
             matrix,
             columns=self.processed_embedding_cols,
-            index=x_test.index,
-        )
-
-    # =========================================================================
-    # PCA
-    # =========================================================================
-
-    @staticmethod
-    def _effective_pca_components(
-        requested: int,
-        matrix: np.ndarray,
-    ) -> int:
-        """
-        Determine a valid PCA dimensionality for the current training fold.
-
-        PCA dimensionality is limited by:
-        - the requested number of components;
-        - the number of original features;
-        - the effective rank supported by the number of training samples.
-        """
-
-        max_components = min(
-            matrix.shape[0] - 1,
-            matrix.shape[1],
-        )
-
-        if max_components < 1:
-            raise ValueError(
-                "PCA requires at least two training observations."
-            )
-
-        return min(
-            requested,
-            max_components,
+            index=x.index,
         )

@@ -1,4 +1,6 @@
 import time
+import warnings
+
 from typing import Optional
 
 import numpy as np
@@ -6,13 +8,16 @@ import pandas as pd
 
 from sklearn.ensemble import (
     ExtraTreesRegressor,
+    GradientBoostingRegressor,
     RandomForestRegressor,
 )
+from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import (
     ElasticNet,
     Ridge,
 )
 from sklearn.svm import SVR
+
 from xgboost import XGBRegressor
 
 
@@ -151,6 +156,9 @@ class RidgeRegressionModel(
 ):
     """
     Ridge Regression.
+
+    The SVD solver is used because it is numerically stable for
+    singular or ill-conditioned feature matrices.
     """
 
     def __init__(
@@ -158,6 +166,11 @@ class RidgeRegressionModel(
         **params,
     ) -> None:
         super().__init__()
+
+        params.setdefault(
+            "solver",
+            "svd",
+        )
 
         self.model = Ridge(
             **params
@@ -191,6 +204,9 @@ class ElasticNetModel(
 ):
     """
     Elastic Net Regression.
+
+    Non-converged fits are rejected so they cannot receive an Optuna
+    validation score.
     """
 
     def __init__(
@@ -215,11 +231,27 @@ class ElasticNetModel(
         sample_weight: np.ndarray | None = None,
     ) -> None:
 
-        self.model.fit(
-            x,
-            self._target_values(y),
-            sample_weight=sample_weight,
-        )
+        try:
+
+            with warnings.catch_warnings():
+
+                warnings.filterwarnings(
+                    "error",
+                    category=ConvergenceWarning,
+                )
+
+                self.model.fit(
+                    x,
+                    self._target_values(y),
+                    sample_weight=sample_weight,
+                )
+
+        except ConvergenceWarning as exc:
+
+            raise ModelConvergenceError(
+                "Elastic Net reached the iteration limit "
+                "before convergence."
+            ) from exc
 
     def _predict(
         self,
@@ -288,7 +320,7 @@ class SVRModel(
 
 
 # =============================================================================
-# TREE ENSEMBLES
+# BAGGED TREE ENSEMBLES
 # =============================================================================
 
 
@@ -397,8 +429,55 @@ class ExtraTreesModel(
 
 
 # =============================================================================
-# GRADIENT BOOSTING
+# BOOSTED TREE ENSEMBLES
 # =============================================================================
+
+
+class GradientBoostingModel(
+    AbstractModel
+):
+    """
+    Gradient Boosting Regressor.
+    """
+
+    def __init__(
+        self,
+        **params,
+    ) -> None:
+        super().__init__()
+
+        params.setdefault(
+            "random_state",
+            AbstractModel.seed,
+        )
+
+        self.model = (
+            GradientBoostingRegressor(
+                **params
+            )
+        )
+
+    def _fit(
+        self,
+        x: pd.DataFrame,
+        y: pd.DataFrame,
+        sample_weight: np.ndarray | None = None,
+    ) -> None:
+
+        self.model.fit(
+            x,
+            self._target_values(y),
+            sample_weight=sample_weight,
+        )
+
+    def _predict(
+        self,
+        x: pd.DataFrame,
+    ) -> np.ndarray:
+
+        return self.model.predict(
+            x
+        )
 
 
 class XGBoostModel(

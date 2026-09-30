@@ -4,6 +4,7 @@ from .definitions import (
     AbstractModel,
     ElasticNetModel,
     ExtraTreesModel,
+    GradientBoostingModel,
     RandomForestModel,
     RidgeRegressionModel,
     SVRModel,
@@ -18,7 +19,7 @@ from .definitions import (
 
 class RegressionModels(IntEnum):
     """
-    Regression models evaluated in the HFI prediction experiment.
+    Regression model families evaluated in the HFI prediction experiment.
     """
 
     RIDGE_REGRESSION = auto()
@@ -26,6 +27,7 @@ class RegressionModels(IntEnum):
     SVR = auto()
     RANDOM_FOREST = auto()
     EXTRA_TREES = auto()
+    GRADIENT_BOOSTING = auto()
     XGBOOST = auto()
 
 
@@ -46,24 +48,12 @@ class ModelFactory:
     ) -> AbstractModel:
         """
         Create a regression model using the supplied hyperparameters.
-
-        Parameters
-        ----------
-        model : RegressionModels
-            Model to instantiate.
-        params : dict | None
-            Hyperparameters selected for the model.
-            If None, default parameters are used.
-
-        Returns
-        -------
-        AbstractModel
-            Instantiated regression model.
         """
 
         params = params or {}
 
         match model:
+
             case RegressionModels.RIDGE_REGRESSION:
                 return RidgeRegressionModel(
                     **params
@@ -86,6 +76,11 @@ class ModelFactory:
 
             case RegressionModels.EXTRA_TREES:
                 return ExtraTreesModel(
+                    **params
+                )
+
+            case RegressionModels.GRADIENT_BOOSTING:
+                return GradientBoostingModel(
                     **params
                 )
 

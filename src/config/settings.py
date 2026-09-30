@@ -12,24 +12,68 @@ from src.core.models.factory import RegressionModels
 # =============================================================================
 
 
-def _optional_int(
-    value: str | None,
-) -> int | None:
+def _parse_csv_strings(
+    value: str,
+) -> tuple[str, ...]:
     """
-    Parse an optional integer from the environment.
-
-    Values such as "", "none" or None disable the option.
+    Parse a comma-separated list of lowercase strings.
     """
 
-    if value is None:
-        return None
+    values = tuple(
+        item.strip().lower()
+        for item in str(value).split(",")
+        if item.strip()
+    )
 
-    value = str(value).strip()
+    if not values:
+        raise ValueError(
+            "Expected at least one comma-separated value."
+        )
 
-    if not value or value.lower() == "none":
-        return None
+    return values
 
-    return int(value)
+
+def _parse_csv_ints(
+    value: str,
+) -> tuple[int, ...]:
+    """
+    Parse a comma-separated list of integers.
+    """
+
+    try:
+        values = tuple(
+            int(item.strip())
+            for item in str(value).split(",")
+            if item.strip()
+        )
+
+    except ValueError as exc:
+        raise ValueError(
+            f"Expected comma-separated integers, got: {value}"
+        ) from exc
+
+    if not values:
+        raise ValueError(
+            "Expected at least one integer value."
+        )
+
+    return values
+
+
+def _check_duplicates(
+    values,
+    name: str,
+):
+    """
+    Reject duplicated configuration values.
+    """
+
+    if len(values) != len(set(values)):
+        raise ValueError(
+            f"{name} contains duplicated values: {values}"
+        )
+
+    return values
 
 
 # =============================================================================
@@ -113,6 +157,7 @@ class DataConfig:
         )
 
         if extension not in self.DATA_EXTENSIONS:
+
             allowed = ", ".join(
                 sorted(
                     self.DATA_EXTENSIONS
@@ -187,21 +232,50 @@ class DataConfig:
 
 
 # =============================================================================
-# MODELS AND FEATURES
+# MODELS AND PIPELINE SEARCH SPACE
 # =============================================================================
 
 
 @dataclass
 class ModelConfig:
+    """
+    Define the candidate machine-learning pipelines explored during
+    inner cross-validation.
+
+    These values define the search space rather than one fixed pipeline.
+    """
+
     models_config: str
     random_state: int
 
-    feature_set: str
+    feature_sets_config: str
+    aggregation_strategies_config: str
+    reduction_methods_config: str
 
-    pca_indices_components: int | None
-    pca_embeddings_components: int | None
+    pca_indices_candidates_config: str
+    pca_embeddings_candidates_config: str
 
     models: list[RegressionModels] = field(
+        init=False
+    )
+
+    feature_sets: tuple[str, ...] = field(
+        init=False
+    )
+
+    aggregation_strategies: tuple[str, ...] = field(
+        init=False
+    )
+
+    reduction_methods: tuple[str, ...] = field(
+        init=False
+    )
+
+    pca_indices_candidates: tuple[int, ...] = field(
+        init=False
+    )
+
+    pca_embeddings_candidates: tuple[int, ...] = field(
         init=False
     )
 
@@ -213,18 +287,56 @@ class ModelConfig:
             self._parse_models()
         )
 
+        self.feature_sets = (
+            _check_duplicates(
+                _parse_csv_strings(
+                    self.feature_sets_config
+                ),
+                "FEATURE_SETS",
+            )
+        )
+
+        self.aggregation_strategies = (
+            _check_duplicates(
+                _parse_csv_strings(
+                    self.aggregation_strategies_config
+                ),
+                "AGGREGATION_STRATEGIES",
+            )
+        )
+
+        self.reduction_methods = (
+            _check_duplicates(
+                _parse_csv_strings(
+                    self.reduction_methods_config
+                ),
+                "REDUCTION_METHODS",
+            )
+        )
+
+        self.pca_indices_candidates = (
+            _check_duplicates(
+                _parse_csv_ints(
+                    self.pca_indices_candidates_config
+                ),
+                "PCA_INDICES_CANDIDATES",
+            )
+        )
+
+        self.pca_embeddings_candidates = (
+            _check_duplicates(
+                _parse_csv_ints(
+                    self.pca_embeddings_candidates_config
+                ),
+                "PCA_EMBEDDINGS_CANDIDATES",
+            )
+        )
+
         self._validate_random_state()
-        self._validate_feature_set()
-
-        self._validate_pca_components(
-            name="PCA_INDICES_COMPONENTS",
-            value=self.pca_indices_components,
-        )
-
-        self._validate_pca_components(
-            name="PCA_EMBEDDINGS_COMPONENTS",
-            value=self.pca_embeddings_components,
-        )
+        self._validate_feature_sets()
+        self._validate_aggregation_strategies()
+        self._validate_reduction_methods()
+        self._validate_pca_candidates()
 
         from src.core.models.definitions import (
             AbstractModel,
@@ -251,33 +363,41 @@ class ModelConfig:
                 default=42,
                 cast=int,
             ),
-            feature_set=str(
+            feature_sets_config=str(
                 config(
-                    "FEATURE_SET",
-                    default="indices",
-                )
-            ).lower(),
-            pca_indices_components=(
-                _optional_int(
-                    str(
-                        config(
-                            "PCA_INDICES_COMPONENTS",
-                            default="30",
-                        )
-                    )
+                    "FEATURE_SETS",
+                    default="indices,embeddings,both",
                 )
             ),
-            pca_embeddings_components=(
-                _optional_int(
-                    str(
-                        config(
-                            "PCA_EMBEDDINGS_COMPONENTS",
-                            default="30",
-                        )
-                    )
+            aggregation_strategies_config=str(
+                config(
+                    "AGGREGATION_STRATEGIES",
+                    default="mean,mean_std,hierarchical",
+                )
+            ),
+            reduction_methods_config=str(
+                config(
+                    "REDUCTION_METHODS",
+                    default="none,pca",
+                )
+            ),
+            pca_indices_candidates_config=str(
+                config(
+                    "PCA_INDICES_CANDIDATES",
+                    default="6,8,10,12,14,16,18,20,22,24",
+                )
+            ),
+            pca_embeddings_candidates_config=str(
+                config(
+                    "PCA_EMBEDDINGS_CANDIDATES",
+                    default="6,8,10,12,14,16,18,20,22,24",
                 )
             ),
         )
+
+    # =========================================================================
+    # MODELS
+    # =========================================================================
 
     def _parse_models(
         self,
@@ -298,55 +418,22 @@ class ModelConfig:
             if name.strip()
         ]
 
+        if not names:
+            raise ValueError(
+                "MODELS must contain at least one model."
+            )
+
         models = [
-            self._to_enum(name)
+            self._to_enum(
+                name
+            )
             for name in names
         ]
 
-        return self._check_duplicates(
-            models
+        return _check_duplicates(
+            models,
+            "MODELS",
         )
-
-    def _validate_random_state(
-        self,
-    ) -> None:
-
-        if self.random_state < 0:
-            raise ValueError(
-                "RANDOM_STATE must be >= 0, "
-                f"got: {self.random_state}"
-            )
-
-    def _validate_feature_set(
-        self,
-    ) -> None:
-
-        valid = {
-            "indices",
-            "embeddings",
-            "both",
-        }
-
-        if self.feature_set not in valid:
-            raise ValueError(
-                "FEATURE_SET must be one of: "
-                "indices, embeddings, both."
-            )
-
-    @staticmethod
-    def _validate_pca_components(
-        name: str,
-        value: int | None,
-    ) -> None:
-
-        if (
-            value is not None
-            and value <= 0
-        ):
-            raise ValueError(
-                f"{name} must be > 0 "
-                "or None."
-            )
 
     @staticmethod
     def _to_enum(
@@ -359,6 +446,7 @@ class ModelConfig:
             ]
 
         except KeyError as exc:
+
             valid = ", ".join(
                 model.name
                 for model in RegressionModels
@@ -369,27 +457,126 @@ class ModelConfig:
                 f"Valid names: {valid}."
             ) from exc
 
-    @staticmethod
-    def _check_duplicates(
-        models: list[RegressionModels],
-    ) -> list[RegressionModels]:
+    # =========================================================================
+    # VALIDATION
+    # =========================================================================
 
-        seen = set()
+    def _validate_random_state(
+        self,
+    ) -> None:
 
-        for model in models:
-
-            if model in seen:
-                raise ValueError(
-                    f"Duplicate model "
-                    f"'{model.name}' found "
-                    "in MODELS."
-                )
-
-            seen.add(
-                model
+        if self.random_state < 0:
+            raise ValueError(
+                "RANDOM_STATE must be >= 0, "
+                f"got: {self.random_state}"
             )
 
-        return models
+    def _validate_feature_sets(
+        self,
+    ) -> None:
+
+        valid = {
+            "indices",
+            "embeddings",
+            "both",
+        }
+
+        invalid = (
+            set(self.feature_sets)
+            - valid
+        )
+
+        if invalid:
+            raise ValueError(
+                "FEATURE_SETS contains invalid values: "
+                f"{sorted(invalid)}. "
+                "Valid values are: "
+                "indices, embeddings, both."
+            )
+
+    def _validate_aggregation_strategies(
+        self,
+    ) -> None:
+
+        valid = {
+            "mean",
+            "mean_std",
+            "hierarchical",
+        }
+
+        invalid = (
+            set(self.aggregation_strategies)
+            - valid
+        )
+
+        if invalid:
+            raise ValueError(
+                "AGGREGATION_STRATEGIES contains invalid values: "
+                f"{sorted(invalid)}. "
+                "Valid values are: "
+                "mean, mean_std, hierarchical."
+            )
+
+    def _validate_reduction_methods(
+        self,
+    ) -> None:
+
+        valid = {
+            "none",
+            "pca",
+        }
+
+        invalid = (
+            set(self.reduction_methods)
+            - valid
+        )
+
+        if invalid:
+            raise ValueError(
+                "REDUCTION_METHODS contains invalid values: "
+                f"{sorted(invalid)}. "
+                "Valid values are: "
+                "none, pca."
+            )
+
+    def _validate_pca_candidates(
+        self,
+    ) -> None:
+
+        self._validate_positive_integers(
+            name="PCA_INDICES_CANDIDATES",
+            values=self.pca_indices_candidates,
+        )
+
+        self._validate_positive_integers(
+            name="PCA_EMBEDDINGS_CANDIDATES",
+            values=self.pca_embeddings_candidates,
+        )
+
+    @staticmethod
+    def _validate_positive_integers(
+        name: str,
+        values: tuple[int, ...],
+    ) -> None:
+
+        if any(
+            value <= 0
+            for value in values
+        ):
+            raise ValueError(
+                f"{name} must contain only "
+                "positive integers."
+            )
+
+        if tuple(
+            sorted(
+                values
+            )
+        ) != values:
+            raise ValueError(
+                f"{name} must be sorted "
+                "in increasing order."
+            )
 
 
 # =============================================================================
@@ -399,8 +586,20 @@ class ModelConfig:
 
 @dataclass
 class ValidationConfig:
+    """
+    Nested grouped cross-validation configuration.
+
+    Outer CV estimates the generalization performance of the complete
+    pipeline-selection procedure on unseen Points.
+
+    Inner CV selects the complete pipeline using only outer-training data.
+    """
+
     outer_splits: int
+    outer_repeats: int
+
     inner_splits: int
+
     optuna_trials: int
 
     def __post_init__(
@@ -410,6 +609,11 @@ class ValidationConfig:
         if self.outer_splits < 2:
             raise ValueError(
                 "OUTER_SPLITS must be >= 2."
+            )
+
+        if self.outer_repeats < 1:
+            raise ValueError(
+                "OUTER_REPEATS must be >= 1."
             )
 
         if self.inner_splits < 2:
@@ -433,6 +637,11 @@ class ValidationConfig:
                 default=5,
                 cast=int,
             ),
+            outer_repeats=config(
+                "OUTER_REPEATS",
+                default=3,
+                cast=int,
+            ),
             inner_splits=config(
                 "INNER_SPLITS",
                 default=4,
@@ -440,7 +649,7 @@ class ValidationConfig:
             ),
             optuna_trials=config(
                 "OPTUNA_TRIALS",
-                default=20,
+                default=60,
                 cast=int,
             ),
         )

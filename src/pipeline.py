@@ -4,6 +4,7 @@ from .config.settings import Settings
 from .core.data.data_loader import DataLoader
 from .core.evaluation.evaluator import ModelEvaluator
 from .core.processors.presplit import PreSplitProcessor
+from src.core.evaluation.plots import save_evaluation_plots
 
 
 logger = logging.getLogger(__name__)
@@ -16,13 +17,13 @@ logger = logging.getLogger(__name__)
 
 class Pipeline:
     """
-    Orchestrate the end-to-end supervised machine learning pipeline.
+    Orchestrate the supervised machine-learning experiment.
 
     Steps
     -----
-    1. Load raw data and schema.
-    2. Build one hierarchical acoustic signature per CapturePointId.
-    3. Evaluate the selected regression models using nested GroupKFold.
+    1. Load data and schema.
+    2. Build the candidate acoustic representations per CapturePointId.
+    3. Run nested grouped cross-validation for complete pipeline selection.
     """
 
     def __init__(
@@ -37,7 +38,7 @@ class Pipeline:
     ) -> None:
 
         # =====================================================================
-        # DATA LOADING
+        # DATA
         # =====================================================================
 
         loader = DataLoader(
@@ -49,43 +50,52 @@ class Pipeline:
         schema = loader.load_schema()
 
         logger.info(
-            "Data loaded successfully with shape %s",
+            "Data loaded with shape %s",
             df_raw.shape,
         )
 
         # =====================================================================
-        # HIERARCHICAL AGGREGATION
+        # PRE-SPLIT ACOUSTIC REPRESENTATIONS
         # =====================================================================
 
-        pre_split_processor = PreSplitProcessor(
+        processor = PreSplitProcessor(
             schema=schema
         )
 
-        df_processed = (
-            pre_split_processor.process(
-                df_raw
-            )
+        signatures = processor.process_all(
+            df_raw=df_raw,
+            aggregations=(
+                self.settings.model.aggregation_strategies
+            ),
         )
 
-        logger.info(
-            "Hierarchical acoustic signatures created "
-            "successfully with shape %s",
-            df_processed.shape,
-        )
+        reference = signatures[
+            self.settings.model.aggregation_strategies[0]
+        ]
 
         logger.info(
-            "Processed dataset contains %d CapturePointIds "
+            "Acoustic signatures created for %d CapturePointIds "
             "across %d Points",
-            df_processed[
+            reference[
                 schema.bag
             ].nunique(),
-            df_processed[
+            reference[
                 schema.group
             ].nunique(),
         )
 
+        for aggregation, dataframe in (
+            signatures.items()
+        ):
+
+            logger.info(
+                "Aggregation '%s': shape=%s",
+                aggregation,
+                dataframe.shape,
+            )
+
         # =====================================================================
-        # MODEL EVALUATION
+        # NESTED PIPELINE SELECTION
         # =====================================================================
 
         evaluator = ModelEvaluator(
@@ -93,18 +103,39 @@ class Pipeline:
             output_dir=self.settings.data.output_dir,
             models=self.settings.model.models,
             random_state=self.settings.model.random_state,
-            feature_set=self.settings.model.feature_set,
-            pca_indices_components=(
-                self.settings.model.pca_indices_components
+            feature_sets=(
+                self.settings.model.feature_sets
             ),
-            pca_embeddings_components=(
-                self.settings.model.pca_embeddings_components
+            aggregations=(
+                self.settings.model.aggregation_strategies
             ),
-            outer_splits=self.settings.validation.outer_splits,
-            inner_splits=self.settings.validation.inner_splits,
-            optuna_trials=self.settings.validation.optuna_trials,
+            reductions=(
+                self.settings.model.reduction_methods
+            ),
+            pca_indices_candidates=(
+                self.settings.model.pca_indices_candidates
+            ),
+            pca_embeddings_candidates=(
+                self.settings.model.pca_embeddings_candidates
+            ),
+            outer_splits=(
+                self.settings.validation.outer_splits
+            ),
+            outer_repeats=(
+                self.settings.validation.outer_repeats
+            ),
+            inner_splits=(
+                self.settings.validation.inner_splits
+            ),
+            optuna_trials=(
+                self.settings.validation.optuna_trials
+            ),
         )
 
         evaluator.evaluate(
-            df_processed
+            signatures
+        )
+
+        save_evaluation_plots(
+            self.settings.data.output_dir
         )

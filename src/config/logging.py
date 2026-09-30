@@ -5,6 +5,7 @@ import shutil
 
 from datetime import datetime
 from logging import Filter
+import optuna
 
 from .settings import Settings
 
@@ -31,11 +32,9 @@ class LogFilter(Filter):
         record: logging.LogRecord,
     ) -> bool:
 
-        logger_name = record.name
-
         return (
-            logger_name == "__main__"
-            or logger_name.startswith("src.")
+            record.name == "__main__"
+            or record.name.startswith("src.")
         )
 
 
@@ -47,11 +46,6 @@ class LogFilter(Filter):
 class LogSetup:
     """
     Configure and manage logging for one experiment run.
-
-    Parameters
-    ----------
-    settings : Settings
-        Experiment configuration.
     """
 
     def __init__(
@@ -137,6 +131,10 @@ class LogSetup:
             True
         )
 
+        optuna.logging.set_verbosity(
+            optuna.logging.WARNING
+        )
+
     # =========================================================================
     # EXPERIMENT METADATA
     # =========================================================================
@@ -145,7 +143,7 @@ class LogSetup:
         self,
     ) -> None:
         """
-        Write the main experiment configuration to the log.
+        Write the experiment configuration to the log.
         """
 
         model_names = ", ".join(
@@ -153,76 +151,120 @@ class LogSetup:
             for model in self.settings.model.models
         )
 
+        feature_sets = ", ".join(
+            self.settings.model.feature_sets
+        )
+
+        aggregations = ", ".join(
+            self.settings.model.aggregation_strategies
+        )
+
+        reductions = ", ".join(
+            self.settings.model.reduction_methods
+        )
+
+        pca_indices = ", ".join(
+            str(value)
+            for value in (
+                self.settings.model
+                .pca_indices_candidates
+            )
+        )
+
+        pca_embeddings = ", ".join(
+            str(value)
+            for value in (
+                self.settings.model
+                .pca_embeddings_candidates
+            )
+        )
+
         metadata = [
             "",
             "========== New Experiment ==========",
             (
-                f"Timestamp           : "
+                f"Timestamp              : "
                 f"{datetime.now().isoformat()}"
             ),
             (
-                f"Output directory    : "
+                f"Output directory       : "
                 f"{self.output_dir}"
             ),
             (
-                f"Platform            : "
+                f"Platform               : "
                 f"{platform.system()} "
                 f"{platform.release()}"
             ),
             (
-                f"Python version      : "
+                f"Python version         : "
                 f"{platform.python_version()}"
             ),
+
             "",
             "---------- Data ----------",
             (
-                f"Dataset             : "
+                f"Dataset                : "
                 f"{self.settings.data.data_path}"
             ),
             (
-                f"Schema              : "
+                f"Schema                 : "
                 f"{self.settings.data.schema_path}"
             ),
+
             "",
-            "---------- Representation ----------",
+            "---------- Pipeline search space ----------",
             (
-                f"Feature set         : "
-                f"{self.settings.model.feature_set}"
+                f"Feature sets           : "
+                f"{feature_sets}"
             ),
             (
-                f"PCA indices         : "
-                f"{self.settings.model.pca_indices_components}"
+                f"Aggregations           : "
+                f"{aggregations}"
             ),
             (
-                f"PCA embeddings      : "
-                f"{self.settings.model.pca_embeddings_components}"
+                f"Reduction methods      : "
+                f"{reductions}"
             ),
             (
-                "Aggregation         : "
-                "mean + within-day std + between-day std"
+                f"PCA indices candidates : "
+                f"{pca_indices}"
             ),
+            (
+                f"PCA embedding candidates: "
+                f"{pca_embeddings}"
+            ),
+
             "",
             "---------- Models ----------",
             (
-                f"Models              : "
+                f"Model families         : "
                 f"{model_names}"
             ),
             (
-                f"Random state        : "
+                "Reference baselines    : "
+                "mean, median"
+            ),
+            (
+                f"Random state           : "
                 f"{self.settings.model.random_state}"
             ),
+
             "",
             "---------- Nested CV ----------",
             (
-                f"Outer folds         : "
+                f"Outer folds            : "
                 f"{self.settings.validation.outer_splits}"
             ),
             (
-                f"Inner folds         : "
+                f"Outer repeats          : "
+                f"{self.settings.validation.outer_repeats}"
+            ),
+            (
+                f"Inner folds            : "
                 f"{self.settings.validation.inner_splits}"
             ),
             (
-                f"Optuna trials       : "
+                f"Optuna trials/family   : "
                 f"{self.settings.validation.optuna_trials}"
             ),
             "",
