@@ -18,21 +18,23 @@ def suggest_pipeline_configuration(
     pca_embeddings_candidates: tuple[int, ...],
     feature_dimensions: dict[str, dict[str, int]],
     min_cv_train_size: int,
+    selection_indices_candidates: tuple[int, ...] | None = None,
+    selection_embeddings_candidates: tuple[int, ...] | None = None,
 ) -> dict:
     """
     Suggest one complete machine-learning pipeline.
 
     A single Optuna trial jointly selects:
 
-        model family
         feature representation
-        aggregation strategy
+        acoustic aggregation
         dimensionality reduction
-        PCA dimensionality, when applicable
+        reduction dimensionality, when applicable
+        model family
         model-specific hyperparameters
 
-    The resulting configuration remains fixed while the candidate is
-    evaluated across all cross-validation folds and repetitions.
+    The resulting configuration remains fixed across all CV folds and
+    repetitions used to evaluate the candidate.
     """
 
     if not models:
@@ -81,6 +83,10 @@ def suggest_pipeline_configuration(
         model_name
     ]
 
+    dimensions = feature_dimensions[
+        aggregation
+    ]
+
     # =========================================================================
     # PCA
     # =========================================================================
@@ -89,10 +95,6 @@ def suggest_pipeline_configuration(
     pca_embeddings_components = None
 
     if reduction == "pca":
-
-        dimensions = feature_dimensions[
-            aggregation
-        ]
 
         if feature_set in {
             "indices",
@@ -147,6 +149,73 @@ def suggest_pipeline_configuration(
             )
 
     # =========================================================================
+    # SUPERVISED FEATURE SELECTION
+    # =========================================================================
+
+    selection_indices_features = None
+    selection_embeddings_features = None
+
+    if reduction == "supervised_selection":
+
+        indices_candidates = (
+            selection_indices_candidates
+            if selection_indices_candidates is not None
+            else pca_indices_candidates
+        )
+
+        embeddings_candidates = (
+            selection_embeddings_candidates
+            if selection_embeddings_candidates is not None
+            else pca_embeddings_candidates
+        )
+
+        if feature_set in {
+            "indices",
+            "both",
+        }:
+
+            selection_indices_features = (
+                _suggest_selected_features(
+                    trial=trial,
+                    name=(
+                        "selection_indices_features"
+                        f"__{aggregation}"
+                    ),
+                    candidates=(
+                        indices_candidates
+                    ),
+                    feature_dimension=(
+                        dimensions[
+                            "indices"
+                        ]
+                    ),
+                )
+            )
+
+        if feature_set in {
+            "embeddings",
+            "both",
+        }:
+
+            selection_embeddings_features = (
+                _suggest_selected_features(
+                    trial=trial,
+                    name=(
+                        "selection_embeddings_features"
+                        f"__{aggregation}"
+                    ),
+                    candidates=(
+                        embeddings_candidates
+                    ),
+                    feature_dimension=(
+                        dimensions[
+                            "embeddings"
+                        ]
+                    ),
+                )
+            )
+
+    # =========================================================================
     # MODEL-SPECIFIC HYPERPARAMETERS
     # =========================================================================
 
@@ -155,7 +224,7 @@ def suggest_pipeline_configuration(
         model=model,
     )
 
-    return {
+    configuration = {
         "model":
             model,
 
@@ -178,6 +247,22 @@ def suggest_pipeline_configuration(
             model_params,
     }
 
+    if reduction == "supervised_selection":
+
+        configuration[
+            "selection_indices_features"
+        ] = (
+            selection_indices_features
+        )
+
+        configuration[
+            "selection_embeddings_features"
+        ] = (
+            selection_embeddings_features
+        )
+
+    return configuration
+
 
 # =============================================================================
 # PCA SEARCH
@@ -198,8 +283,6 @@ def _suggest_pca_components(
 
         original feature dimensionality
         smallest CV training-set size minus one
-
-    The minus one reflects the maximum non-zero rank after centering.
     """
 
     if feature_dimension < 1:
@@ -236,6 +319,49 @@ def _suggest_pca_components(
 
 
 # =============================================================================
+# SUPERVISED FEATURE-SELECTION SEARCH
+# =============================================================================
+
+
+def _suggest_selected_features(
+    trial: optuna.Trial,
+    name: str,
+    candidates: tuple[int, ...],
+    feature_dimension: int,
+) -> int:
+    """
+    Suggest the number of features retained by supervised selection.
+
+    Correlation-based selection is not subject to the PCA rank constraint.
+    The selected dimension only needs to be no larger than the original
+    feature block.
+    """
+
+    if feature_dimension < 1:
+        raise optuna.TrialPruned(
+            "No features available for supervised-selection "
+            f"parameter '{name}'."
+        )
+
+    feasible = [
+        value
+        for value in candidates
+        if value <= feature_dimension
+    ]
+
+    if not feasible:
+        raise optuna.TrialPruned(
+            "No feasible supervised-selection dimension for "
+            f"'{name}'. Maximum allowed: {feature_dimension}."
+        )
+
+    return trial.suggest_categorical(
+        name,
+        feasible,
+    )
+
+
+# =============================================================================
 # MODEL HYPERPARAMETER SEARCH
 # =============================================================================
 
@@ -247,12 +373,9 @@ def suggest_parameters(
     """
     Suggest model-specific hyperparameters.
 
-    Optuna parameter names are prefixed by model family so that different
-    conditional branches of the same study never reuse one parameter name
-    with incompatible distributions.
-
-    The returned dictionary uses the parameter names expected by the
-    underlying scikit-learn or XGBoost estimator.
+    Optuna parameter names are namespaced by model family so conditional
+    branches never reuse the same parameter name with incompatible
+    distributions.
     """
 
     match model:
@@ -300,6 +423,47 @@ def suggest_parameters(
             }
 
         # =====================================================================
+        # BAYESIAN RIDGE
+        # =====================================================================
+
+        case RegressionModels.BAYESIAN_RIDGE:
+
+            alpha_prior = (
+                trial.suggest_float(
+                    "bayesian_alpha_prior",
+                    1e-8,
+                    1e-2,
+                    log=True,
+                )
+            )
+
+            lambda_prior = (
+                trial.suggest_float(
+                    "bayesian_lambda_prior",
+                    1e-8,
+                    1e-2,
+                    log=True,
+                )
+            )
+
+            return {
+                "alpha_1":
+                    alpha_prior,
+
+                "alpha_2":
+                    alpha_prior,
+
+                "lambda_1":
+                    lambda_prior,
+
+                "lambda_2":
+                    lambda_prior,
+
+                "max_iter":
+                    1000,
+            }
+
+        # =====================================================================
         # SUPPORT VECTOR REGRESSION
         # =====================================================================
 
@@ -341,6 +505,33 @@ def suggest_parameters(
             }
 
         # =====================================================================
+        # KERNEL RIDGE
+        # =====================================================================
+
+        case RegressionModels.KERNEL_RIDGE:
+
+            return {
+                "alpha":
+                    trial.suggest_float(
+                        "kernel_ridge_alpha",
+                        1e-4,
+                        1e3,
+                        log=True,
+                    ),
+
+                "gamma":
+                    trial.suggest_float(
+                        "kernel_ridge_gamma",
+                        1e-4,
+                        1.0,
+                        log=True,
+                    ),
+
+                "kernel":
+                    "rbf",
+            }
+
+        # =====================================================================
         # RANDOM FOREST
         # =====================================================================
 
@@ -361,6 +552,13 @@ def suggest_parameters(
                             12,
                             20,
                         ],
+                    ),
+
+                "min_samples_split":
+                    trial.suggest_int(
+                        "rf_min_samples_split",
+                        2,
+                        12,
                     ),
 
                 "min_samples_leaf":
@@ -399,6 +597,13 @@ def suggest_parameters(
                             12,
                             20,
                         ],
+                    ),
+
+                "min_samples_split":
+                    trial.suggest_int(
+                        "et_min_samples_split",
+                        2,
+                        12,
                     ),
 
                 "min_samples_leaf":
@@ -453,6 +658,13 @@ def suggest_parameters(
                         "gb_max_depth",
                         1,
                         5,
+                    ),
+
+                "min_samples_split":
+                    trial.suggest_int(
+                        "gb_min_samples_split",
+                        2,
+                        12,
                     ),
 
                 "min_samples_leaf":
@@ -530,6 +742,13 @@ def suggest_parameters(
                         log=True,
                     ),
 
+                "gamma":
+                    trial.suggest_float(
+                        "xgb_gamma",
+                        0.0,
+                        5.0,
+                    ),
+
                 "subsample":
                     trial.suggest_float(
                         "xgb_subsample",
@@ -565,6 +784,152 @@ def suggest_parameters(
 
                 "tree_method":
                     "hist",
+            }
+
+        # =====================================================================
+        # LIGHTGBM
+        # =====================================================================
+
+        case RegressionModels.LIGHTGBM:
+
+            return {
+                "n_estimators":
+                    trial.suggest_int(
+                        "lgbm_n_estimators",
+                        100,
+                        800,
+                        step=50,
+                    ),
+
+                "learning_rate":
+                    trial.suggest_float(
+                        "lgbm_learning_rate",
+                        0.005,
+                        0.2,
+                        log=True,
+                    ),
+
+                "num_leaves":
+                    trial.suggest_categorical(
+                        "lgbm_num_leaves",
+                        [
+                            4,
+                            8,
+                            16,
+                            32,
+                        ],
+                    ),
+
+                "max_depth":
+                    trial.suggest_categorical(
+                        "lgbm_max_depth",
+                        [
+                            -1,
+                            3,
+                            5,
+                            7,
+                        ],
+                    ),
+
+                "min_child_samples":
+                    trial.suggest_int(
+                        "lgbm_min_child_samples",
+                        2,
+                        20,
+                    ),
+
+                "subsample":
+                    trial.suggest_float(
+                        "lgbm_subsample",
+                        0.5,
+                        1.0,
+                    ),
+
+                "subsample_freq":
+                    1,
+
+                "colsample_bytree":
+                    trial.suggest_float(
+                        "lgbm_colsample_bytree",
+                        0.4,
+                        1.0,
+                    ),
+
+                "reg_lambda":
+                    trial.suggest_float(
+                        "lgbm_reg_lambda",
+                        1e-3,
+                        1e3,
+                        log=True,
+                    ),
+
+                "reg_alpha":
+                    trial.suggest_float(
+                        "lgbm_reg_alpha",
+                        1e-4,
+                        1e2,
+                        log=True,
+                    ),
+
+                "objective":
+                    "regression",
+            }
+
+        # =====================================================================
+        # CATBOOST
+        # =====================================================================
+
+        case RegressionModels.CATBOOST:
+
+            return {
+                "iterations":
+                    trial.suggest_int(
+                        "catboost_iterations",
+                        200,
+                        1000,
+                        step=100,
+                    ),
+
+                "learning_rate":
+                    trial.suggest_float(
+                        "catboost_learning_rate",
+                        0.005,
+                        0.2,
+                        log=True,
+                    ),
+
+                "depth":
+                    trial.suggest_int(
+                        "catboost_depth",
+                        2,
+                        8,
+                    ),
+
+                "l2_leaf_reg":
+                    trial.suggest_float(
+                        "catboost_l2_leaf_reg",
+                        1e-2,
+                        1e2,
+                        log=True,
+                    ),
+
+                "random_strength":
+                    trial.suggest_float(
+                        "catboost_random_strength",
+                        1e-3,
+                        10.0,
+                        log=True,
+                    ),
+
+                "rsm":
+                    trial.suggest_float(
+                        "catboost_rsm",
+                        0.5,
+                        1.0,
+                    ),
+
+                "loss_function":
+                    "RMSE",
             }
 
         # =====================================================================

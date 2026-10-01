@@ -90,7 +90,7 @@ class ModelEvaluator:
            feature representation
            acoustic aggregation
            dimensionality reduction
-           PCA dimensionality
+           reduction dimensionality, when applicable
            model family
            model hyperparameters
 
@@ -102,12 +102,13 @@ class ModelEvaluator:
 
     7. Select the pipeline with the lowest mean repeated OOF MAE.
 
-    8. Fit the selected pipeline on the complete development set.
+    8. Reconstruct OOF predictions only for the selected pipeline.
 
-    9. Evaluate it once on the isolated final test set.
+    9. Fit the selected pipeline on the complete development set.
 
-    10. Save article-oriented scientific outputs together with the manifests
-        required for reproducibility.
+    10. Evaluate it once on the isolated final test set.
+
+    11. Save scientific outputs and reproducibility manifests.
     """
 
     def __init__(
@@ -125,29 +126,19 @@ class ModelEvaluator:
         cv_splits: int,
         cv_repeats: int,
         optuna_trials: int,
+        selection_indices_candidates: tuple[int, ...] | None = None,
+        selection_embeddings_candidates: tuple[int, ...] | None = None,
     ) -> None:
 
         self.schema = schema
-
         self.output_dir = output_dir
 
         self.models = models
+        self.random_state = random_state
 
-        self.random_state = (
-            random_state
-        )
-
-        self.feature_sets = (
-            feature_sets
-        )
-
-        self.aggregations = (
-            aggregations
-        )
-
-        self.reductions = (
-            reductions
-        )
+        self.feature_sets = feature_sets
+        self.aggregations = aggregations
+        self.reductions = reductions
 
         self.pca_indices_candidates = (
             pca_indices_candidates
@@ -157,21 +148,24 @@ class ModelEvaluator:
             pca_embeddings_candidates
         )
 
-        self.test_size = (
-            test_size
+        self.selection_indices_candidates = (
+            selection_indices_candidates
+            if selection_indices_candidates is not None
+            else pca_indices_candidates
         )
 
-        self.cv_splits = (
-            cv_splits
+        self.selection_embeddings_candidates = (
+            selection_embeddings_candidates
+            if selection_embeddings_candidates is not None
+            else pca_embeddings_candidates
         )
 
-        self.cv_repeats = (
-            cv_repeats
-        )
+        self.test_size = test_size
 
-        self.optuna_trials = (
-            optuna_trials
-        )
+        self.cv_splits = cv_splits
+        self.cv_repeats = cv_repeats
+
+        self.optuna_trials = optuna_trials
 
     # =========================================================================
     # PUBLIC API
@@ -224,10 +218,8 @@ class ModelEvaluator:
             development_bags,
             test_bags,
             split_manifest,
-        ) = (
-            self._make_development_test_split(
-                reference
-            )
+        ) = self._make_development_test_split(
+            reference
         )
 
         development_reference = (
@@ -323,7 +315,9 @@ class ModelEvaluator:
                 reference=(
                     development_reference
                 ),
-                cv_splits=cv_splits,
+                cv_splits=(
+                    cv_splits
+                ),
             )
         )
 
@@ -346,13 +340,6 @@ class ModelEvaluator:
         trial_repeat_rows: list[
             dict
         ] = []
-
-        # OOF predictions are retained in memory during the search but only
-        # the final selected trial will be written to disk.
-        trial_oof_predictions: dict[
-            int,
-            pd.DataFrame,
-        ] = {}
 
         # =====================================================================
         # SINGLE CASH STUDY
@@ -398,6 +385,12 @@ class ModelEvaluator:
                     ),
                     pca_embeddings_candidates=(
                         self.pca_embeddings_candidates
+                    ),
+                    selection_indices_candidates=(
+                        self.selection_indices_candidates
+                    ),
+                    selection_embeddings_candidates=(
+                        self.selection_embeddings_candidates
                     ),
                     feature_dimensions=(
                         feature_dimensions
@@ -546,12 +539,6 @@ class ModelEvaluator:
                 ]
             )
 
-            trial_oof_predictions[
-                trial.number
-            ] = result[
-                "oof_predictions"
-            ]
-
             logger.info(
                 "Trial %d complete — %s — "
                 "features=%s, aggregation=%s, reduction=%s — "
@@ -658,7 +645,7 @@ class ModelEvaluator:
         )
 
         # =====================================================================
-        # SELECTED PIPELINE OOF RESULTS
+        # SELECTED PIPELINE CV METRICS
         # =====================================================================
 
         selected_repeat_metrics = (
@@ -671,9 +658,51 @@ class ModelEvaluator:
             .copy()
         )
 
+        # =====================================================================
+        # RECONSTRUCT SELECTED PIPELINE OOF PREDICTIONS
+        # =====================================================================
+
+        logger.info(
+            "Reconstructing OOF predictions for selected trial %d "
+            "using the frozen CV partitions.",
+            best_trial.number,
+        )
+
+        selected_cv_result = (
+            self._evaluate_configuration(
+                signatures=(
+                    signatures
+                ),
+                configuration=(
+                    best_configuration
+                ),
+                cv_splits=(
+                    cv_splits
+                ),
+                trial_number=(
+                    best_trial.number
+                ),
+            )
+        )
+
+        reconstructed_cv_mae = (
+            selected_cv_result[
+                "summary"
+            ][
+                "CV_MAE"
+            ]
+        )
+
+        logger.info(
+            "Selected trial OOF reconstruction — "
+            "original CV MAE %.6f, reconstructed CV MAE %.6f",
+            best_trial.value,
+            reconstructed_cv_mae,
+        )
+
         selected_model_oof = (
-            trial_oof_predictions[
-                best_trial.number
+            selected_cv_result[
+                "oof_predictions"
             ]
             .copy()
         )
@@ -823,9 +852,56 @@ class ModelEvaluator:
                     best_trial.number
                 ),
 
+            "selection_objective":
+                {
+                    "metric":
+                        "point_balanced_MAE",
+
+                    "CV_MAE":
+                        float(
+                            best_trial.value
+                        ),
+
+                    "CV_MAE_std":
+                        float(
+                            best_trial.user_attrs.get(
+                                "cv_mae_std",
+                                np.nan,
+                            )
+                        ),
+                },
+
             "pipeline":
                 self._serializable_config(
                     best_configuration
+                ),
+
+            "raw_feature_count":
+                int(
+                    best_trial.user_attrs[
+                        "raw_feature_count"
+                    ]
+                ),
+
+            "model_feature_count":
+                int(
+                    best_trial.user_attrs[
+                        "model_feature_count"
+                    ]
+                ),
+
+            "final_fit_time":
+                float(
+                    final_result[
+                        "fit_time"
+                    ]
+                ),
+
+            "final_prediction_time":
+                float(
+                    final_result[
+                        "prediction_time"
+                    ]
                 ),
         }
 
@@ -875,7 +951,6 @@ class ModelEvaluator:
             "selected_pipeline":
                 selected_pipeline,
 
-            # Retained as a compatibility alias for existing tests/code.
             "final_selection":
                 selected_pipeline,
 
@@ -895,13 +970,6 @@ class ModelEvaluator:
         tuple,
         pd.DataFrame,
     ]:
-        """
-        Split physical Points once into development and final-test sets.
-
-        TEST_SIZE is applied to the number of independent Points.
-
-        The split is deterministic for a fixed RANDOM_STATE.
-        """
 
         points = np.array(
             sorted(
@@ -920,6 +988,7 @@ class ModelEvaluator:
         )
 
         if n_points < 2:
+
             raise ValueError(
                 "At least two independent Points are required."
             )
@@ -940,6 +1009,7 @@ class ModelEvaluator:
             n_test_points
             >= n_points
         ):
+
             raise ValueError(
                 "TEST_SIZE leaves no Points for development."
             )
@@ -1041,11 +1111,6 @@ class ModelEvaluator:
         self,
         development_reference: pd.DataFrame,
     ) -> list[CVSplit]:
-        """
-        Precompute all repeated grouped CV partitions.
-
-        Every Optuna trial receives these exact same partitions.
-        """
 
         groups = (
             development_reference[
@@ -1115,6 +1180,7 @@ class ModelEvaluator:
                         validation_points
                     )
                 ):
+
                     raise RuntimeError(
                         "Point leakage detected between "
                         "CV training and validation sets."
@@ -1122,12 +1188,8 @@ class ModelEvaluator:
 
                 splits.append(
                     CVSplit(
-                        repeat=(
-                            repeat
-                        ),
-                        fold=(
-                            fold
-                        ),
+                        repeat=repeat,
+                        fold=fold,
                         train_bags=tuple(
                             train[
                                 self.schema.bag
@@ -1163,13 +1225,6 @@ class ModelEvaluator:
         cv_splits: list[CVSplit],
         trial_number: int,
     ) -> dict:
-        """
-        Evaluate one fixed complete pipeline across all CV partitions.
-
-        One Point-balanced OOF metric is calculated per repetition.
-
-        The final candidate score is the mean repetition-level OOF MAE.
-        """
 
         df = signatures[
             configuration[
@@ -1178,11 +1233,9 @@ class ModelEvaluator:
         ]
 
         repeat_rows = []
-
         all_oof_frames = []
 
         fit_times = []
-
         prediction_times = []
 
         for repeat in range(
@@ -1241,10 +1294,6 @@ class ModelEvaluator:
                     )
                 )
 
-                # =============================================================
-                # TRAINING-ONLY PREPROCESSING
-                # =============================================================
-
                 processor = (
                     PostSplitProcessor(
                         schema=(
@@ -1270,6 +1319,16 @@ class ModelEvaluator:
                                 "pca_embeddings_components"
                             ]
                         ),
+                        selection_indices_features=(
+                            configuration.get(
+                                "selection_indices_features"
+                            )
+                        ),
+                        selection_embeddings_features=(
+                            configuration.get(
+                                "selection_embeddings_features"
+                            )
+                        ),
                     )
                 )
 
@@ -1288,10 +1347,6 @@ class ModelEvaluator:
                         X_validation
                     )
                 )
-
-                # =============================================================
-                # FOLD MODEL
-                # =============================================================
 
                 model = (
                     ModelFactory.create_model(
@@ -1372,10 +1427,6 @@ class ModelEvaluator:
                 prediction_frames.append(
                     result
                 )
-
-            # =================================================================
-            # COMPLETE OOF DATASET FOR ONE REPEAT
-            # =================================================================
 
             repeat_oof = pd.concat(
                 prediction_frames,
@@ -1511,10 +1562,6 @@ class ModelEvaluator:
         test_bags: tuple,
         configuration: dict,
     ) -> dict:
-        """
-        Fit the selected pipeline using all development data and evaluate it
-        once on the isolated final test set.
-        """
 
         df = signatures[
             configuration[
@@ -1584,6 +1631,16 @@ class ModelEvaluator:
                     configuration[
                         "pca_embeddings_components"
                     ]
+                ),
+                selection_indices_features=(
+                    configuration.get(
+                        "selection_indices_features"
+                    )
+                ),
+                selection_embeddings_features=(
+                    configuration.get(
+                        "selection_embeddings_features"
+                    )
                 ),
             )
         )
@@ -1701,13 +1758,8 @@ class ModelEvaluator:
         reference: pd.DataFrame,
         cv_splits: list[CVSplit],
     ) -> dict:
-        """
-        Evaluate training-only Point-balanced mean and median baselines using
-        the same repeated CV partitions as the candidate pipelines.
-        """
 
         repeat_rows = []
-
         all_oof_frames = []
 
         for repeat in range(
@@ -1870,12 +1922,6 @@ class ModelEvaluator:
         selected_model_oof: pd.DataFrame,
         baseline_oof: pd.DataFrame,
     ) -> pd.DataFrame:
-        """
-        Build one analysis-ready table containing OOF predictions from the
-        selected pipeline and both baselines.
-
-        Only the selected pipeline is retained in the final output.
-        """
 
         keys = [
             "repeat",
@@ -1929,7 +1975,7 @@ class ModelEvaluator:
             )
         )
 
-        result = (
+        return (
             result.sort_values(
                 [
                     "repeat",
@@ -1943,8 +1989,6 @@ class ModelEvaluator:
             )
         )
 
-        return result
-
     # =========================================================================
     # ARTICLE-ORIENTED FINAL TEST PREDICTIONS
     # =========================================================================
@@ -1955,10 +1999,6 @@ class ModelEvaluator:
         mean_baseline: float,
         median_baseline: float,
     ) -> pd.DataFrame:
-        """
-        Build the final independent-test table used for figures, residual
-        analysis and paired baseline comparisons.
-        """
 
         result = (
             model_predictions.copy()
@@ -1992,7 +2032,7 @@ class ModelEvaluator:
             )
         )
 
-        result = (
+        return (
             result.sort_values(
                 [
                     self.schema.group,
@@ -2004,8 +2044,6 @@ class ModelEvaluator:
             )
         )
 
-        return result
-
     # =========================================================================
     # PREDICTION ERRORS
     # =========================================================================
@@ -2014,13 +2052,6 @@ class ModelEvaluator:
     def _add_prediction_errors(
         df: pd.DataFrame,
     ) -> pd.DataFrame:
-        """
-        Add model and baseline residual/error columns.
-
-        Residual is defined as:
-
-            observed - predicted
-        """
 
         result = (
             df.copy()
@@ -2120,14 +2151,6 @@ class ModelEvaluator:
         development_reference: pd.DataFrame,
         test_reference: pd.DataFrame,
     ) -> pd.DataFrame:
-        """
-        Build the main article-oriented performance table.
-
-        Development CV variability is summarized across complete CV repeats.
-
-        Final-test metrics represent one independent holdout evaluation, so
-        no repeat SD is assigned to those rows.
-        """
 
         development_points = (
             development_reference[
@@ -2159,10 +2182,6 @@ class ModelEvaluator:
 
         rows = []
 
-        # =====================================================================
-        # DEVELOPMENT CV — SELECTED PIPELINE
-        # =====================================================================
-
         rows.append(
             self._summary_row_from_repeats(
                 stage="development_cv",
@@ -2190,10 +2209,6 @@ class ModelEvaluator:
                 ),
             )
         )
-
-        # =====================================================================
-        # DEVELOPMENT CV — MEAN BASELINE
-        # =====================================================================
 
         rows.append(
             self._summary_row_from_repeats(
@@ -2223,10 +2238,6 @@ class ModelEvaluator:
             )
         )
 
-        # =====================================================================
-        # DEVELOPMENT CV — MEDIAN BASELINE
-        # =====================================================================
-
         rows.append(
             self._summary_row_from_repeats(
                 stage="development_cv",
@@ -2254,10 +2265,6 @@ class ModelEvaluator:
                 ),
             )
         )
-
-        # =====================================================================
-        # FINAL TEST
-        # =====================================================================
 
         for method, metrics in (
             (
@@ -2325,9 +2332,6 @@ class ModelEvaluator:
         n_points: int,
         n_capture_points: int,
     ) -> dict:
-        """
-        Summarize complete repeated-CV scores for one method.
-        """
 
         return {
             "stage":
@@ -2388,9 +2392,6 @@ class ModelEvaluator:
     def _sample_sd(
         values: pd.Series,
     ) -> float:
-        """
-        Sample standard deviation across repeated CV estimates.
-        """
 
         values = (
             pd.Series(
@@ -2402,6 +2403,7 @@ class ModelEvaluator:
         if len(
             values
         ) <= 1:
+
             return 0.0
 
         return float(
@@ -2419,15 +2421,6 @@ class ModelEvaluator:
         study: optuna.Study,
         repeat_metrics: pd.DataFrame,
     ) -> pd.DataFrame:
-        """
-        Build one analysis-ready row per Optuna pipeline candidate.
-
-        Repeat-level scores are pivoted into columns so this single CSV
-        contains both:
-
-            pipeline definition
-            repeated-CV performance
-        """
 
         base = (
             self._study_results_dataframe(
@@ -2436,6 +2429,7 @@ class ModelEvaluator:
         )
 
         if repeat_metrics.empty:
+
             return base
 
         repeat_wide = (
@@ -2469,7 +2463,6 @@ class ModelEvaluator:
             validate="one_to_one",
         )
 
-        # Keep the central scientific columns near the front.
         preferred = [
             "trial",
             "state",
@@ -2480,6 +2473,8 @@ class ModelEvaluator:
             "reduction",
             "pca_indices_components",
             "pca_embeddings_components",
+            "selection_indices_features",
+            "selection_embeddings_features",
             "model_params",
             "CV_MAE",
             "CV_MAE_std",
@@ -2534,9 +2529,6 @@ class ModelEvaluator:
         float,
         float,
     ]:
-        """
-        Calculate Point-balanced training-only mean and median baselines.
-        """
 
         y = (
             df_train[
@@ -2583,9 +2575,6 @@ class ModelEvaluator:
         values: np.ndarray,
         weights: np.ndarray,
     ) -> float:
-        """
-        Weighted median of a one-dimensional array.
-        """
 
         order = (
             np.argsort(
@@ -2638,9 +2627,6 @@ class ModelEvaluator:
         self,
         df: pd.DataFrame,
     ) -> np.ndarray:
-        """
-        Give every physical Point the same total weight.
-        """
 
         n_captures = (
             df.groupby(
@@ -2675,9 +2661,6 @@ class ModelEvaluator:
         df: pd.DataFrame,
         predictions: np.ndarray,
     ) -> RegressionMetrics:
-        """
-        Calculate Point-balanced regression metrics.
-        """
 
         observed = (
             df[
@@ -2743,9 +2726,6 @@ class ModelEvaluator:
             int,
         ],
     ]:
-        """
-        Determine raw feature dimensionality for every aggregation.
-        """
 
         dimensions = {}
 
@@ -2803,9 +2783,6 @@ class ModelEvaluator:
             ],
         ],
     ) -> int:
-        """
-        Number of original features entering preprocessing.
-        """
 
         dimensions = (
             feature_dimensions[
@@ -2858,16 +2835,14 @@ class ModelEvaluator:
             ],
         ],
     ) -> int:
-        """
-        Number of features presented to the regression model.
-        """
 
-        if (
+        reduction = (
             configuration[
                 "reduction"
             ]
-            == "none"
-        ):
+        )
+
+        if reduction == "none":
 
             return (
                 self._raw_feature_count(
@@ -2878,6 +2853,26 @@ class ModelEvaluator:
                         feature_dimensions
                     ),
                 )
+            )
+
+        if reduction == "pca":
+
+            indices_key = (
+                "pca_indices_components"
+            )
+
+            embeddings_key = (
+                "pca_embeddings_components"
+            )
+
+        else:
+
+            indices_key = (
+                "selection_indices_features"
+            )
+
+            embeddings_key = (
+                "selection_embeddings_features"
             )
 
         total = 0
@@ -2891,7 +2886,7 @@ class ModelEvaluator:
 
             total += int(
                 configuration[
-                    "pca_indices_components"
+                    indices_key
                 ]
             )
 
@@ -2904,7 +2899,7 @@ class ModelEvaluator:
 
             total += int(
                 configuration[
-                    "pca_embeddings_components"
+                    embeddings_key
                 ]
             )
 
@@ -2921,9 +2916,6 @@ class ModelEvaluator:
             pd.DataFrame,
         ],
     ) -> None:
-        """
-        Ensure every aggregation describes exactly the same statistical units.
-        """
 
         missing = (
             set(
@@ -2935,6 +2927,7 @@ class ModelEvaluator:
         )
 
         if missing:
+
             raise ValueError(
                 "Missing aggregation representations: "
                 f"{sorted(missing)}"
@@ -2989,6 +2982,7 @@ class ModelEvaluator:
                     current
                 )
             ):
+
                 raise ValueError(
                     "Aggregation representations do not contain "
                     "identical CapturePointIds, Points and targets."
@@ -3003,9 +2997,6 @@ class ModelEvaluator:
         df: pd.DataFrame,
         bags: tuple,
     ) -> pd.DataFrame:
-        """
-        Select CapturePointIds while preserving dataframe order.
-        """
 
         bag_set = set(
             bags
@@ -3031,9 +3022,6 @@ class ModelEvaluator:
         development_reference: pd.DataFrame,
         cv_splits: list[CVSplit],
     ) -> pd.DataFrame:
-        """
-        Store every repeated CV assignment for reproducibility.
-        """
 
         bag_to_point = (
             development_reference
@@ -3113,9 +3101,6 @@ class ModelEvaluator:
     def _serializable_config(
         configuration: dict,
     ) -> dict:
-        """
-        Convert a configuration into a JSON-compatible structure.
-        """
 
         result = dict(
             configuration
@@ -3135,9 +3120,6 @@ class ModelEvaluator:
     def _configuration_from_serialized(
         configuration: dict,
     ) -> dict:
-        """
-        Restore a pipeline configuration stored in Optuna.
-        """
 
         result = dict(
             configuration
@@ -3157,9 +3139,6 @@ class ModelEvaluator:
         self,
         configuration: dict,
     ) -> dict:
-        """
-        Flatten one pipeline configuration for CSV output.
-        """
 
         model = (
             configuration[
@@ -3196,14 +3175,24 @@ class ModelEvaluator:
                 ],
 
             "pca_indices_components":
-                configuration[
+                configuration.get(
                     "pca_indices_components"
-                ],
+                ),
 
             "pca_embeddings_components":
-                configuration[
+                configuration.get(
                     "pca_embeddings_components"
-                ],
+                ),
+
+            "selection_indices_features":
+                configuration.get(
+                    "selection_indices_features"
+                ),
+
+            "selection_embeddings_features":
+                configuration.get(
+                    "selection_embeddings_features"
+                ),
 
             "model_params":
                 json.dumps(
@@ -3222,9 +3211,6 @@ class ModelEvaluator:
         self,
         study: optuna.Study,
     ) -> pd.DataFrame:
-        """
-        Convert the complete Optuna history into one row per candidate.
-        """
 
         rows = []
 
@@ -3286,6 +3272,12 @@ class ModelEvaluator:
                             None,
 
                         "pca_embeddings_components":
+                            None,
+
+                        "selection_indices_features":
+                            None,
+
+                        "selection_embeddings_features":
                             None,
 
                         "model_params":
@@ -3481,9 +3473,6 @@ class ModelEvaluator:
         split_manifest: pd.DataFrame,
         cv_split_manifest: pd.DataFrame,
     ) -> None:
-        """
-        Save article-oriented outputs and reproducibility manifests.
-        """
 
         os.makedirs(
             self.output_dir,
@@ -3501,10 +3490,6 @@ class ModelEvaluator:
             reproducibility_dir,
             exist_ok=True,
         )
-
-        # =====================================================================
-        # SCIENTIFIC RESULTS
-        # =====================================================================
 
         performance_summary.to_csv(
             os.path.join(
@@ -3553,10 +3538,6 @@ class ModelEvaluator:
                 indent=2,
             )
 
-        # =====================================================================
-        # REPRODUCIBILITY
-        # =====================================================================
-
         split_manifest.to_csv(
             os.path.join(
                 reproducibility_dir,
@@ -3586,9 +3567,6 @@ class ModelEvaluator:
         self,
         repeat: int,
     ) -> int:
-        """
-        Deterministic seed for one CV repetition.
-        """
 
         return (
             self.random_state

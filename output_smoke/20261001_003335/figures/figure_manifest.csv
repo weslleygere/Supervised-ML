@@ -1,0 +1,11 @@
+figure,section,scientific_question,data_level,interpretation
+figure_01_observed_vs_predicted,main,How closely do independent final-test predictions match observed HFI values?,CapturePointId,primary_independent_test_result
+figure_02_pointwise_baseline_gain,main,At which independent Points does the selected pipeline improve on simple reference predictions?,Point after CapturePointId-level error calculation,independent_test_baseline_comparison
+figure_03_cv_repeat_stability,main,Is model-selection performance stable across repeated grouped CV partitions?,complete CV repeat,model_selection_stability
+figure_s01_residuals,supplementary,Does prediction bias change across the observed HFI gradient?,CapturePointId,independent_test_diagnostic
+figure_s02_cv_prediction_stability,supplementary,How much do OOF predictions for individual CapturePointIds vary across CV repeats?,CapturePointId across repeated CV,stability_diagnostic
+figure_s03_hfi_partition_ecdf,supplementary,How similar are the Point-balanced HFI distributions of development and final-test partitions?,Point-balanced CapturePointId distribution,experimental_design_diagnostic
+figure_s04_optuna_history,supplementary,How did the best observed CV MAE evolve during the adaptive search?,Optuna trial,adaptive_search_diagnostic
+figure_s05_top_candidates,supplementary,Which complete pipeline configurations achieved the lowest observed CV MAE?,Optuna trial,adaptive_search_descriptive_not_formal_comparison
+figure_s06_dimensionality,supplementary,How does model dimensionality relate descriptively to observed CV performance?,Optuna trial,adaptive_search_descriptive_not_formal_comparison
+figure_s07_search_coverage,supplementary,How was the adaptive search budget distributed across pipeline components?,Optuna completed trials,adaptive_search_coverage

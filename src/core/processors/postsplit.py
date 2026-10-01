@@ -4,6 +4,9 @@ import pandas as pd
 from sklearn.preprocessing import StandardScaler
 
 from src.core.data.schema import Schema
+from src.core.processors.feature_selection import (
+    WeightedCorrelationSelector,
+)
 
 
 # =============================================================================
@@ -127,9 +130,11 @@ class WeightedPCA:
             self.n_components
         )
 
-        self.components_ = components[
-            :self.n_components
-        ]
+        self.components_ = (
+            components[
+                :self.n_components
+            ]
+        )
 
         self.singular_values_ = (
             singular_values[
@@ -186,6 +191,7 @@ class WeightedPCA:
             self.mean_ is None
             or self.components_ is None
         ):
+
             raise RuntimeError(
                 "WeightedPCA must be fitted before transform()."
             )
@@ -196,14 +202,20 @@ class WeightedPCA:
         )
 
         if matrix.ndim != 2:
+
             raise ValueError(
                 "PCA input must be a two-dimensional matrix."
             )
 
         if (
-            matrix.shape[1]
-            != self.mean_.shape[0]
+            matrix.shape[
+                1
+            ]
+            != self.mean_.shape[
+                0
+            ]
         ):
+
             raise ValueError(
                 "PCA input has a different number of features "
                 "from the fitted data."
@@ -250,24 +262,34 @@ class WeightedPCA:
         """
 
         if matrix.ndim != 2:
+
             raise ValueError(
                 "PCA input must be a two-dimensional matrix."
             )
 
-        if matrix.shape[0] < 2:
+        if matrix.shape[
+            0
+        ] < 2:
+
             raise ValueError(
                 "PCA requires at least two observations."
             )
 
         if weights.ndim != 1:
+
             raise ValueError(
                 "sample_weight must be one-dimensional."
             )
 
         if (
-            len(weights)
-            != matrix.shape[0]
+            len(
+                weights
+            )
+            != matrix.shape[
+                0
+            ]
         ):
+
             raise ValueError(
                 "sample_weight length must match "
                 "the number of observations."
@@ -278,6 +300,7 @@ class WeightedPCA:
                 weights
             )
         ):
+
             raise ValueError(
                 "sample_weight contains non-finite values."
             )
@@ -285,6 +308,7 @@ class WeightedPCA:
         if np.any(
             weights <= 0
         ):
+
             raise ValueError(
                 "sample_weight values must be positive."
             )
@@ -294,6 +318,7 @@ class WeightedPCA:
                 matrix
             )
         ):
+
             raise ValueError(
                 "PCA input contains non-finite values."
             )
@@ -312,15 +337,16 @@ class PostSplitProcessor:
     --------------
     indices:
         Point-balanced StandardScaler
-        -> optional Point-balanced PCA
+        -> optional Point-balanced PCA or supervised feature selection
 
     embeddings:
         Point-balanced StandardScaler
-        -> optional Point-balanced PCA
+        -> optional Point-balanced PCA or supervised feature selection
 
     both:
-        process indices and embeddings independently,
-        then concatenate the resulting blocks.
+        process indices and embeddings independently
+        -> normalize each processed block to equal weighted energy
+        -> concatenate the resulting blocks
 
     Target
     ------
@@ -335,8 +361,9 @@ class PostSplitProcessor:
 
     Leakage prevention
     ------------------
-    All preprocessing parameters are fitted exclusively on the corresponding
-    training fold or, for the final model, on the complete development set.
+    All learned preprocessing parameters are fitted exclusively on the
+    corresponding training fold or, for the final model, on the complete
+    development set.
     """
 
     def __init__(
@@ -346,12 +373,19 @@ class PostSplitProcessor:
         reduction: str,
         pca_indices_components: int | None = None,
         pca_embeddings_components: int | None = None,
+        selection_indices_features: int | None = None,
+        selection_embeddings_features: int | None = None,
     ) -> None:
 
         self.schema = schema
 
-        self.feature_set = feature_set
-        self.reduction = reduction
+        self.feature_set = (
+            feature_set
+        )
+
+        self.reduction = (
+            reduction
+        )
 
         self.pca_indices_components = (
             pca_indices_components
@@ -359,6 +393,14 @@ class PostSplitProcessor:
 
         self.pca_embeddings_components = (
             pca_embeddings_components
+        )
+
+        self.selection_indices_features = (
+            selection_indices_features
+        )
+
+        self.selection_embeddings_features = (
+            selection_embeddings_features
         )
 
         self._validate_configuration()
@@ -392,6 +434,32 @@ class PostSplitProcessor:
             WeightedPCA
             | None
         ) = None
+
+        # =====================================================================
+        # SUPERVISED FEATURE SELECTION
+        # =====================================================================
+
+        self.index_selector: (
+            WeightedCorrelationSelector
+            | None
+        ) = None
+
+        self.embedding_selector: (
+            WeightedCorrelationSelector
+            | None
+        ) = None
+
+        # =====================================================================
+        # BLOCK NORMALIZATION
+        # =====================================================================
+
+        self.index_block_scale_: float = (
+            1.0
+        )
+
+        self.embedding_block_scale_: float = (
+            1.0
+        )
 
         # =====================================================================
         # FEATURE METADATA
@@ -430,6 +498,15 @@ class PostSplitProcessor:
             )
         )
 
+        target = (
+            y_train[
+                self.schema.target
+            ]
+            .to_numpy(
+                dtype=float
+            )
+        )
+
         # =====================================================================
         # FEATURES
         # =====================================================================
@@ -437,6 +514,7 @@ class PostSplitProcessor:
         x_transformed = (
             self._fit_transform_features(
                 x_train=x_train,
+                target=target,
                 sample_weight=sample_weight,
             )
         )
@@ -446,13 +524,9 @@ class PostSplitProcessor:
         # =====================================================================
 
         target_matrix = (
-            y_train[
-                [
-                    self.schema.target
-                ]
-            ]
-            .to_numpy(
-                dtype=float
+            target.reshape(
+                -1,
+                1,
             )
         )
 
@@ -519,11 +593,6 @@ class PostSplitProcessor:
                 )
             )
 
-        if not parts:
-            raise RuntimeError(
-                "No active feature blocks were available."
-            )
-
         return pd.concat(
             parts,
             axis=1,
@@ -574,6 +643,7 @@ class PostSplitProcessor:
     def _fit_transform_features(
         self,
         x_train: pd.DataFrame,
+        target: np.ndarray,
         sample_weight: np.ndarray,
     ) -> pd.DataFrame:
         """
@@ -592,9 +662,8 @@ class PostSplitProcessor:
             parts.append(
                 self._fit_transform_indices(
                     x_train=x_train,
-                    sample_weight=(
-                        sample_weight
-                    ),
+                    target=target,
+                    sample_weight=sample_weight,
                 )
             )
 
@@ -606,15 +675,9 @@ class PostSplitProcessor:
             parts.append(
                 self._fit_transform_embeddings(
                     x_train=x_train,
-                    sample_weight=(
-                        sample_weight
-                    ),
+                    target=target,
+                    sample_weight=sample_weight,
                 )
-            )
-
-        if not parts:
-            raise RuntimeError(
-                "No active feature blocks were available."
             )
 
         return pd.concat(
@@ -629,11 +692,11 @@ class PostSplitProcessor:
     def _fit_transform_indices(
         self,
         x_train: pd.DataFrame,
+        target: np.ndarray,
         sample_weight: np.ndarray,
     ) -> pd.DataFrame:
         """
-        Point-balance the acoustic-index scaling and optionally apply
-        Point-balanced PCA.
+        Fit the acoustic-index preprocessing block.
         """
 
         self.index_cols = (
@@ -641,11 +704,6 @@ class PostSplitProcessor:
                 x_train.columns
             )
         )
-
-        if not self.index_cols:
-            raise ValueError(
-                "No acoustic-index columns were found."
-            )
 
         matrix = (
             x_train[
@@ -678,19 +736,10 @@ class PostSplitProcessor:
         )
 
         # =====================================================================
-        # OPTIONAL WEIGHTED PCA
+        # REDUCTION
         # =====================================================================
 
         if self.reduction == "pca":
-
-            if (
-                self.pca_indices_components
-                is None
-            ):
-                raise ValueError(
-                    "PCA components were not defined "
-                    "for the indices block."
-                )
 
             self.index_pca = (
                 WeightedPCA(
@@ -717,10 +766,61 @@ class PostSplitProcessor:
                 )
             ]
 
+        elif (
+            self.reduction
+            == "supervised_selection"
+        ):
+
+            self.index_selector = (
+                WeightedCorrelationSelector(
+                    n_features=(
+                        self.selection_indices_features
+                    )
+                )
+            )
+
+            matrix = (
+                self.index_selector
+                .fit_transform(
+                    matrix,
+                    target,
+                    sample_weight,
+                )
+            )
+
+            self.processed_index_cols = [
+                self.index_cols[
+                    index
+                ]
+                for index
+                in (
+                    self.index_selector
+                    .selected_indices_
+                )
+            ]
+
         else:
 
             self.processed_index_cols = (
                 self.index_cols.copy()
+            )
+
+        # =====================================================================
+        # BLOCK BALANCING
+        # =====================================================================
+
+        if self.feature_set == "both":
+
+            self.index_block_scale_ = (
+                self._block_scale(
+                    matrix,
+                    sample_weight,
+                )
+            )
+
+            matrix = (
+                matrix
+                / self.index_block_scale_
             )
 
         return pd.DataFrame(
@@ -748,11 +848,6 @@ class PostSplitProcessor:
             )
         )
 
-        self._validate_feature_matrix(
-            matrix,
-            block_name="indices",
-        )
-
         matrix = (
             self.index_scaler
             .transform(
@@ -772,6 +867,25 @@ class PostSplitProcessor:
                 )
             )
 
+        elif (
+            self.index_selector
+            is not None
+        ):
+
+            matrix = (
+                self.index_selector
+                .transform(
+                    matrix
+                )
+            )
+
+        if self.feature_set == "both":
+
+            matrix = (
+                matrix
+                / self.index_block_scale_
+            )
+
         return pd.DataFrame(
             matrix,
             columns=(
@@ -787,26 +901,18 @@ class PostSplitProcessor:
     def _fit_transform_embeddings(
         self,
         x_train: pd.DataFrame,
+        target: np.ndarray,
         sample_weight: np.ndarray,
     ) -> pd.DataFrame:
         """
-        Point-balance embedding scaling and optionally apply Point-balanced
-        PCA.
+        Fit the embedding preprocessing block.
         """
-
-        if (
-            self.schema.embedding
-            not in x_train.columns
-        ):
-            raise ValueError(
-                "Embedding column not found: "
-                f"{self.schema.embedding}"
-            )
 
         matrix = np.stack(
             x_train[
                 self.schema.embedding
-            ].to_numpy()
+            ]
+            .to_numpy()
         ).astype(
             float
         )
@@ -832,20 +938,20 @@ class PostSplitProcessor:
             )
         )
 
+        original_columns = [
+            f"embedding_{i + 1}"
+            for i in range(
+                matrix.shape[
+                    1
+                ]
+            )
+        ]
+
         # =====================================================================
-        # OPTIONAL WEIGHTED PCA
+        # REDUCTION
         # =====================================================================
 
         if self.reduction == "pca":
-
-            if (
-                self.pca_embeddings_components
-                is None
-            ):
-                raise ValueError(
-                    "PCA components were not defined "
-                    "for the embedding block."
-                )
 
             self.embedding_pca = (
                 WeightedPCA(
@@ -872,16 +978,62 @@ class PostSplitProcessor:
                 )
             ]
 
-        else:
+        elif (
+            self.reduction
+            == "supervised_selection"
+        ):
+
+            self.embedding_selector = (
+                WeightedCorrelationSelector(
+                    n_features=(
+                        self.selection_embeddings_features
+                    )
+                )
+            )
+
+            matrix = (
+                self.embedding_selector
+                .fit_transform(
+                    matrix,
+                    target,
+                    sample_weight,
+                )
+            )
 
             self.processed_embedding_cols = [
-                f"embedding_{i + 1}"
-                for i in range(
-                    matrix.shape[
-                        1
-                    ]
+                original_columns[
+                    index
+                ]
+                for index
+                in (
+                    self.embedding_selector
+                    .selected_indices_
                 )
             ]
+
+        else:
+
+            self.processed_embedding_cols = (
+                original_columns
+            )
+
+        # =====================================================================
+        # BLOCK BALANCING
+        # =====================================================================
+
+        if self.feature_set == "both":
+
+            self.embedding_block_scale_ = (
+                self._block_scale(
+                    matrix,
+                    sample_weight,
+                )
+            )
+
+            matrix = (
+                matrix
+                / self.embedding_block_scale_
+            )
 
         return pd.DataFrame(
             matrix,
@@ -899,26 +1051,13 @@ class PostSplitProcessor:
         Transform the embedding block without refitting.
         """
 
-        if (
-            self.schema.embedding
-            not in x.columns
-        ):
-            raise ValueError(
-                "Embedding column not found: "
-                f"{self.schema.embedding}"
-            )
-
         matrix = np.stack(
             x[
                 self.schema.embedding
-            ].to_numpy()
+            ]
+            .to_numpy()
         ).astype(
             float
-        )
-
-        self._validate_feature_matrix(
-            matrix,
-            block_name="embeddings",
         )
 
         matrix = (
@@ -940,12 +1079,69 @@ class PostSplitProcessor:
                 )
             )
 
+        elif (
+            self.embedding_selector
+            is not None
+        ):
+
+            matrix = (
+                self.embedding_selector
+                .transform(
+                    matrix
+                )
+            )
+
+        if self.feature_set == "both":
+
+            matrix = (
+                matrix
+                / self.embedding_block_scale_
+            )
+
         return pd.DataFrame(
             matrix,
             columns=(
                 self.processed_embedding_cols
             ),
             index=x.index,
+        )
+
+    # =========================================================================
+    # BLOCK BALANCING
+    # =========================================================================
+
+    @staticmethod
+    def _block_scale(
+        matrix: np.ndarray,
+        sample_weight: np.ndarray,
+    ) -> float:
+        """
+        Calculate the weighted RMS Euclidean norm of one feature block.
+
+        Dividing by this value gives the block unit weighted energy:
+
+            weighted mean(||x_i||²) = 1
+
+        This is applied only when indices and embeddings are used together.
+        """
+
+        scale = np.sqrt(
+            np.average(
+                np.sum(
+                    matrix
+                    ** 2,
+                    axis=1,
+                ),
+                weights=sample_weight,
+            )
+        )
+
+        if scale == 0:
+
+            return 1.0
+
+        return float(
+            scale
         )
 
     # =========================================================================
@@ -958,31 +1154,7 @@ class PostSplitProcessor:
     ) -> np.ndarray:
         """
         Give every physical Point equal total preprocessing weight.
-
-        If a Point contains N CapturePointIds, each CapturePointId receives
-        weight 1/N.
-
-        Weights are normalized to mean one. The normalization does not change
-        relative weighting but keeps their numerical scale convenient.
         """
-
-        if (
-            self.schema.group
-            not in x.columns
-        ):
-            raise ValueError(
-                "Grouping column not found in preprocessing data: "
-                f"{self.schema.group}"
-            )
-
-        if (
-            self.schema.bag
-            not in x.columns
-        ):
-            raise ValueError(
-                "CapturePointId column not found in preprocessing data: "
-                f"{self.schema.bag}"
-            )
 
         n_captures = (
             x.groupby(
@@ -997,13 +1169,6 @@ class PostSplitProcessor:
                 dtype=float
             )
         )
-
-        if np.any(
-            n_captures <= 0
-        ):
-            raise ValueError(
-                "Invalid number of CapturePointIds per Point."
-            )
 
         weights = (
             1.0
@@ -1026,34 +1191,94 @@ class PostSplitProcessor:
         Validate preprocessing configuration.
         """
 
-        valid_feature_sets = {
+        if self.feature_set not in {
             "indices",
             "embeddings",
             "both",
-        }
+        }:
 
-        if (
-            self.feature_set
-            not in valid_feature_sets
-        ):
             raise ValueError(
                 "Invalid feature_set: "
                 f"{self.feature_set}"
             )
 
-        valid_reductions = {
+        if self.reduction not in {
             "none",
             "pca",
-        }
+            "supervised_selection",
+        }:
 
-        if (
-            self.reduction
-            not in valid_reductions
-        ):
             raise ValueError(
                 "Invalid reduction method: "
                 f"{self.reduction}"
             )
+
+        if self.reduction == "pca":
+
+            if (
+                self.feature_set
+                in {
+                    "indices",
+                    "both",
+                }
+                and self.pca_indices_components
+                is None
+            ):
+
+                raise ValueError(
+                    "PCA components were not defined "
+                    "for the indices block."
+                )
+
+            if (
+                self.feature_set
+                in {
+                    "embeddings",
+                    "both",
+                }
+                and self.pca_embeddings_components
+                is None
+            ):
+
+                raise ValueError(
+                    "PCA components were not defined "
+                    "for the embedding block."
+                )
+
+        if (
+            self.reduction
+            == "supervised_selection"
+        ):
+
+            if (
+                self.feature_set
+                in {
+                    "indices",
+                    "both",
+                }
+                and self.selection_indices_features
+                is None
+            ):
+
+                raise ValueError(
+                    "Selection dimension was not defined "
+                    "for the indices block."
+                )
+
+            if (
+                self.feature_set
+                in {
+                    "embeddings",
+                    "both",
+                }
+                and self.selection_embeddings_features
+                is None
+            ):
+
+                raise ValueError(
+                    "Selection dimension was not defined "
+                    "for the embedding block."
+                )
 
     def _validate_training_data(
         self,
@@ -1069,6 +1294,7 @@ class PostSplitProcessor:
         ) != len(
             y_train
         ):
+
             raise ValueError(
                 "Training features and targets have different "
                 "numbers of rows."
@@ -1077,17 +1303,9 @@ class PostSplitProcessor:
         if not x_train.index.equals(
             y_train.index
         ):
+
             raise ValueError(
                 "Training features and targets must have aligned indices."
-            )
-
-        if (
-            self.schema.target
-            not in y_train.columns
-        ):
-            raise ValueError(
-                "Target column not found: "
-                f"{self.schema.target}"
             )
 
         target = (
@@ -1104,6 +1322,7 @@ class PostSplitProcessor:
                 target
             )
         ):
+
             raise ValueError(
                 "Training target contains non-finite values."
             )
@@ -1118,11 +1337,15 @@ class PostSplitProcessor:
         """
 
         if matrix.ndim != 2:
+
             raise ValueError(
                 f"{block_name} feature block must be two-dimensional."
             )
 
-        if matrix.shape[1] < 1:
+        if matrix.shape[
+            1
+        ] < 1:
+
             raise ValueError(
                 f"{block_name} feature block contains no features."
             )
@@ -1132,6 +1355,7 @@ class PostSplitProcessor:
                 matrix
             )
         ):
+
             raise ValueError(
                 f"{block_name} feature block contains "
                 "non-finite values."

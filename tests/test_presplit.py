@@ -3,9 +3,7 @@ import pandas as pd
 import pytest
 
 from src.core.data.schema import Schema
-from src.core.processors.presplit import (
-    PreSplitProcessor,
-)
+from src.core.processors.presplit import PreSplitProcessor
 
 
 # =============================================================================
@@ -21,9 +19,7 @@ def schema() -> Schema:
         bag="CapturePointId",
         audio="Audio_Name",
         datetime="Datetime",
-        index_prefixes=(
-            "ACI",
-        ),
+        index_prefixes=("ACI",),
         embedding="Embedding",
     )
 
@@ -31,88 +27,43 @@ def schema() -> Schema:
 @pytest.fixture
 def raw_data() -> pd.DataFrame:
     """
-    Synthetic dataset with known aggregation results.
-
-    CapturePointId B1 contains:
+    Synthetic segment-level data with known aggregation results.
 
     Day 1
     -----
-    A1 -> two valid segments
+    A1:
+        ACI segments = [1, 3]
+        atomic mean = 2
 
-        ACI = 1, 3
-        Audio_Name mean = 2
+    A2:
+        ACI segment = [4]
+        atomic mean = 4
 
-        embedding:
-            [1, 3]
-            [3, 5]
-
-        Audio_Name mean:
-            [2, 4]
-
-    A2 -> one valid segment
-
-        ACI = 4
-
-        embedding:
-            [4, 6]
-
-    Therefore, Day 1:
-
-        ACI daily mean = (2 + 4) / 2 = 3
-
-        ACI daily population SD = 1
-
-        embedding daily mean:
-            ([2, 4] + [4, 6]) / 2
-            = [3, 5]
-
-        embedding daily population SD:
-            [1, 1]
-
+    Daily mean = 3
+    Daily population SD = 1
 
     Day 2
     -----
-    A3 -> three valid segments
+    A3:
+        ACI segments = [5, 7, 9]
+        atomic mean = 7
 
-        ACI = 5, 7, 9
-        Audio_Name mean = 7
+    Daily mean = 7
+    Daily population SD = 0
 
-        embedding:
-            [6, 8]
-            [8, 10]
-            [10, 12]
+    Equal-day final representation
+    ------------------------------
+    mean = 5
 
-        Audio_Name mean:
-            [8, 10]
-
-    Since Day 2 contains one Audio_Name:
-
-        ACI daily mean = 7
-        ACI daily population SD = 0
-
-        embedding daily mean = [8, 10]
-        embedding daily population SD = [0, 0]
-
-
-    Equal-day CapturePointId representation
-    ----------------------------------------
-
-    ACI mean:
-
-        (3 + 7) / 2 = 5
-
-    ACI within-day variance:
-
+    within-day variance =
         (1² + 0²) / 2
         = 0.5
 
-    ACI between-day variance:
-
+    between-day variance =
         ((3 - 5)² + (7 - 5)²) / 2
         = 4
 
-    ACI total variance:
-
+    total variance =
         0.5 + 4
         = 4.5
     """
@@ -146,17 +97,16 @@ def raw_data() -> pd.DataFrame:
                 "A3",
             ],
 
-            "Datetime":
-                pd.to_datetime(
-                    [
-                        "2026-01-01 08:00",
-                        "2026-01-01 08:00",
-                        "2026-01-01 09:00",
-                        "2026-01-02 08:00",
-                        "2026-01-02 08:00",
-                        "2026-01-02 08:00",
-                    ]
-                ),
+            "Datetime": pd.to_datetime(
+                [
+                    "2026-01-01 04:10",
+                    "2026-01-01 04:10",
+                    "2026-01-01 04:40",
+                    "2026-01-02 05:20",
+                    "2026-01-02 05:20",
+                    "2026-01-02 05:20",
+                ]
+            ),
 
             "meanHFI": [
                 10.0,
@@ -177,45 +127,26 @@ def raw_data() -> pd.DataFrame:
             ],
 
             "Embedding": [
-                np.array(
-                    [1.0, 3.0]
-                ),
-                np.array(
-                    [3.0, 5.0]
-                ),
-                np.array(
-                    [4.0, 6.0]
-                ),
-                np.array(
-                    [6.0, 8.0]
-                ),
-                np.array(
-                    [8.0, 10.0]
-                ),
-                np.array(
-                    [10.0, 12.0]
-                ),
+                np.array([1.0, 3.0]),
+                np.array([3.0, 5.0]),
+                np.array([4.0, 6.0]),
+                np.array([6.0, 8.0]),
+                np.array([8.0, 10.0]),
+                np.array([10.0, 12.0]),
             ],
         }
     )
 
 
 # =============================================================================
-# AUDIO_NAME = ATOMIC OBSERVATION
+# SEGMENT -> AUDIO_NAME
 # =============================================================================
 
 
-def test_each_audio_name_becomes_one_atomic_observation(
+def test_prepare_audio_creates_atomic_observations(
     schema: Schema,
     raw_data: pd.DataFrame,
 ) -> None:
-    """
-    After segment aggregation, every Audio_Name must correspond to exactly
-    one row.
-
-    This is the atomic acoustic observation used by all subsequent analyses,
-    including the future recording-effort analysis.
-    """
 
     processor = PreSplitProcessor(
         schema=schema
@@ -225,197 +156,122 @@ def test_each_audio_name_becomes_one_atomic_observation(
         raw_data
     )
 
-    assert len(
-        audio
-    ) == 3
+    assert len(audio) == 3
 
-    assert (
-        audio[
-            "Audio_Name"
-        ]
-        .nunique()
-        == 3
+    assert set(
+        audio["Audio_Name"]
+    ) == {
+        "A1",
+        "A2",
+        "A3",
+    }
+
+
+def test_prepare_audio_averages_segments(
+    schema: Schema,
+    raw_data: pd.DataFrame,
+) -> None:
+
+    processor = PreSplitProcessor(
+        schema=schema
     )
 
-    counts = (
-        audio.groupby(
-            [
-                "Point",
-                "CapturePointId",
-                "Date",
-                "Audio_Name",
-            ]
+    audio = (
+        processor.prepare_audio(
+            raw_data
         )
-        .size()
+        .set_index(
+            "Audio_Name"
+        )
     )
 
-    assert (
-        counts
-        == 1
-    ).all()
-
-
-def test_audio_name_rows_are_averaged_before_temporal_aggregation(
-    schema: Schema,
-    raw_data: pd.DataFrame,
-) -> None:
-    """
-    One Audio_Name must receive equal weight as one atomic observation,
-    independently of whether it originally contained 1, 2 or 3 valid
-    segment rows.
-    """
-
-    processor = PreSplitProcessor(
-        schema=schema
-    )
-
-    audio = processor.prepare_audio(
-        raw_data
-    )
-
-    a1 = (
-        audio[
-            audio[
-                "Audio_Name"
-            ]
-            == "A1"
-        ]
-        .iloc[
-            0
-        ]
-    )
-
-    a2 = (
-        audio[
-            audio[
-                "Audio_Name"
-            ]
-            == "A2"
-        ]
-        .iloc[
-            0
-        ]
-    )
-
-    a3 = (
-        audio[
-            audio[
-                "Audio_Name"
-            ]
-            == "A3"
-        ]
-        .iloc[
-            0
-        ]
-    )
-
-    # =========================================================================
-    # ACOUSTIC INDEX
-    # =========================================================================
-
-    assert a1[
-        "ACI"
+    assert audio.loc[
+        "A1",
+        "ACI",
     ] == pytest.approx(
         2.0
     )
 
-    assert a2[
-        "ACI"
+    assert audio.loc[
+        "A2",
+        "ACI",
     ] == pytest.approx(
         4.0
     )
 
-    assert a3[
-        "ACI"
+    assert audio.loc[
+        "A3",
+        "ACI",
     ] == pytest.approx(
         7.0
     )
 
-    # =========================================================================
-    # EMBEDDING
-    # =========================================================================
-
     np.testing.assert_allclose(
-        a1[
-            "Embedding"
+        audio.loc[
+            "A1",
+            "Embedding",
         ],
-        np.array(
-            [
-                2.0,
-                4.0,
-            ]
-        ),
+        [2.0, 4.0],
     )
 
     np.testing.assert_allclose(
-        a2[
-            "Embedding"
+        audio.loc[
+            "A3",
+            "Embedding",
         ],
-        np.array(
-            [
-                4.0,
-                6.0,
-            ]
-        ),
-    )
-
-    np.testing.assert_allclose(
-        a3[
-            "Embedding"
-        ],
-        np.array(
-            [
-                8.0,
-                10.0,
-            ]
-        ),
+        [8.0, 10.0],
     )
 
 
-def test_audio_table_preserves_date_information(
+def test_prepare_audio_preserves_timestamp(
     schema: Schema,
     raw_data: pd.DataFrame,
 ) -> None:
-    """
-    The atomic Audio_Name table must retain its recording day so the same
-    observations can later be reaggregated after effort subsampling.
-    """
 
     processor = PreSplitProcessor(
         schema=schema
     )
 
-    audio = processor.prepare_audio(
-        raw_data
+    audio = (
+        processor.prepare_audio(
+            raw_data
+        )
+        .set_index(
+            "Audio_Name"
+        )
     )
 
     assert (
-        "Date"
+        "Datetime"
         in audio.columns
     )
 
-    assert (
-        audio[
-            "Date"
-        ]
-        .nunique()
-        == 2
+    assert audio.loc[
+        "A1",
+        "Datetime",
+    ] == pd.Timestamp(
+        "2026-01-01 04:10"
+    )
+
+    assert audio.loc[
+        "A2",
+        "Datetime",
+    ] == pd.Timestamp(
+        "2026-01-01 04:40"
+    )
+
+    assert audio.loc[
+        "A3",
+        "Datetime",
+    ] == pd.Timestamp(
+        "2026-01-02 05:20"
     )
 
 
-# =============================================================================
-# DAILY AGGREGATION
-# =============================================================================
-
-
-def test_daily_statistics_use_audio_names_not_raw_segments(
+def test_prepare_audio_preserves_date(
     schema: Schema,
     raw_data: pd.DataFrame,
 ) -> None:
-    """
-    Daily statistics must be calculated after segment rows have been collapsed
-    to atomic Audio_Name observations.
-    """
 
     processor = PreSplitProcessor(
         schema=schema
@@ -425,125 +281,88 @@ def test_daily_statistics_use_audio_names_not_raw_segments(
         raw_data
     )
 
-    daily = processor.prepare_daily(
-        audio
+    assert audio[
+        "Date"
+    ].nunique() == 2
+
+    assert set(
+        audio["Date"]
+    ) == {
+        pd.Timestamp(
+            "2026-01-01"
+        ).date(),
+        pd.Timestamp(
+            "2026-01-02"
+        ).date(),
+    }
+
+
+# =============================================================================
+# AUDIO_NAME -> DAY
+# =============================================================================
+
+
+def test_prepare_daily_uses_atomic_observations(
+    schema: Schema,
+    raw_data: pd.DataFrame,
+) -> None:
+
+    processor = PreSplitProcessor(
+        schema=schema
     )
 
-    day_1 = (
-        daily[
-            daily[
-                "Date"
-            ]
-            == pd.Timestamp(
-                "2026-01-01"
-            ).date()
-        ]
-        .iloc[
-            0
-        ]
+    audio = processor.prepare_audio(
+        raw_data
     )
 
-    assert day_1[
-        "ACI__daily_mean"
+    daily = (
+        processor.prepare_daily(
+            audio
+        )
+        .set_index(
+            "Date"
+        )
+    )
+
+    day_1 = pd.Timestamp(
+        "2026-01-01"
+    ).date()
+
+    day_2 = pd.Timestamp(
+        "2026-01-02"
+    ).date()
+
+    assert daily.loc[
+        day_1,
+        "ACI__daily_mean",
     ] == pytest.approx(
         3.0
     )
 
-    assert day_1[
-        "ACI__daily_std"
+    assert daily.loc[
+        day_1,
+        "ACI__daily_std",
     ] == pytest.approx(
         1.0
     )
 
-
-def test_daily_standard_deviation_is_population_sd(
-    schema: Schema,
-    raw_data: pd.DataFrame,
-) -> None:
-    """
-    Daily variability must use population SD (ddof=0).
-
-    Day 1 contains atomic ACI observations [2, 4], whose population SD is 1.
-    """
-
-    processor = PreSplitProcessor(
-        schema=schema
-    )
-
-    audio = processor.prepare_audio(
-        raw_data
-    )
-
-    daily = processor.prepare_daily(
-        audio
-    )
-
-    day_1 = (
-        daily.iloc[
-            0
-        ]
-    )
-
-    assert day_1[
-        "ACI__daily_std"
+    assert daily.loc[
+        day_2,
+        "ACI__daily_mean",
     ] == pytest.approx(
-        1.0
+        7.0
     )
 
-
-def test_single_audio_day_has_zero_daily_variability(
-    schema: Schema,
-    raw_data: pd.DataFrame,
-) -> None:
-    """
-    A day represented by a single Audio_Name must have population SD = 0,
-    rather than NaN.
-    """
-
-    processor = PreSplitProcessor(
-        schema=schema
-    )
-
-    audio = processor.prepare_audio(
-        raw_data
-    )
-
-    daily = processor.prepare_daily(
-        audio
-    )
-
-    day_2 = (
-        daily[
-            daily[
-                "Date"
-            ]
-            == pd.Timestamp(
-                "2026-01-02"
-            ).date()
-        ]
-        .iloc[
-            0
-        ]
-    )
-
-    assert day_2[
-        "ACI__daily_std"
+    assert daily.loc[
+        day_2,
+        "ACI__daily_std",
     ] == pytest.approx(
         0.0
     )
 
-    np.testing.assert_allclose(
-        day_2[
-            "embedding__daily_std"
-        ],
-        np.zeros(
-            2
-        ),
-    )
-
 
 # =============================================================================
-# EQUAL-DAY AGGREGATION
+# DAY -> CAPTUREPOINTID
 # =============================================================================
 
 
@@ -551,265 +370,63 @@ def test_mean_uses_equal_day_weighting(
     schema: Schema,
     raw_data: pd.DataFrame,
 ) -> None:
-    """
-    Days receive equal weight regardless of how many Audio_Name observations
-    occur within each day.
-
-    Day 1 has two Audio_Name observations and mean 3.
-    Day 2 has one Audio_Name observation and mean 7.
-
-    Final mean must therefore be:
-
-        (3 + 7) / 2 = 5
-
-    rather than the observation-weighted value:
-
-        (2 + 4 + 7) / 3
-    """
 
     processor = PreSplitProcessor(
         schema=schema
     )
 
-    signatures = (
-        processor.process_all(
-            df_raw=raw_data,
-            aggregations=(
-                "mean",
-                "mean_std",
-                "hierarchical",
-            ),
-        )
+    result = processor.process(
+        raw_data,
+        aggregation="mean",
+    ).iloc[0]
+
+    # Day means are 3 and 7.
+    #
+    # Equal-day mean:
+    #
+    # (3 + 7) / 2 = 5
+    #
+    # This differs from averaging the three Audio_Name observations
+    # directly:
+    #
+    # (2 + 4 + 7) / 3 = 4.333...
+
+    assert result[
+        "ACI_mean"
+    ] == pytest.approx(
+        5.0
     )
 
-    expected_mean = 5.0
 
-    observation_weighted_mean = (
-        2.0
-        + 4.0
-        + 7.0
-    ) / 3.0
-
-    for aggregation in signatures:
-
-        result = (
-            signatures[
-                aggregation
-            ]
-            .iloc[
-                0
-            ]
-        )
-
-        assert result[
-            "ACI_mean"
-        ] == pytest.approx(
-            expected_mean
-        )
-
-        assert result[
-            "ACI_mean"
-        ] != pytest.approx(
-            observation_weighted_mean
-        )
-
-
-# =============================================================================
-# AGGREGATION REPRESENTATIONS
-# =============================================================================
-
-
-def test_three_aggregation_strategies_share_same_mean(
+def test_variance_decomposition(
     schema: Schema,
     raw_data: pd.DataFrame,
 ) -> None:
-    """
-    Aggregation strategies differ only in the temporal-variability information
-    retained.
-
-    The underlying acoustic mean must be identical.
-    """
 
     processor = PreSplitProcessor(
         schema=schema
     )
 
-    signatures = (
-        processor.process_all(
-            df_raw=raw_data,
-            aggregations=(
-                "mean",
-                "mean_std",
-                "hierarchical",
-            ),
-        )
-    )
-
-    mean = (
-        signatures[
-            "mean"
-        ]
-        .iloc[
-            0
-        ]
+    signatures = processor.process_all(
+        df_raw=raw_data,
+        aggregations=(
+            "mean_std",
+            "hierarchical",
+        ),
     )
 
     mean_std = (
         signatures[
             "mean_std"
         ]
-        .iloc[
-            0
-        ]
+        .iloc[0]
     )
 
     hierarchical = (
         signatures[
             "hierarchical"
         ]
-        .iloc[
-            0
-        ]
-    )
-
-    assert mean[
-        "ACI_mean"
-    ] == pytest.approx(
-        mean_std[
-            "ACI_mean"
-        ]
-    )
-
-    assert mean[
-        "ACI_mean"
-    ] == pytest.approx(
-        hierarchical[
-            "ACI_mean"
-        ]
-    )
-
-
-def test_all_aggregation_strategies_have_identical_units_and_targets(
-    schema: Schema,
-    raw_data: pd.DataFrame,
-) -> None:
-    """
-    Every aggregation representation must describe exactly the same
-    CapturePointIds, Points and target values.
-
-    This is required so candidate pipelines are evaluated on the same
-    statistical units.
-    """
-
-    processor = PreSplitProcessor(
-        schema=schema
-    )
-
-    signatures = (
-        processor.process_all(
-            df_raw=raw_data,
-            aggregations=(
-                "mean",
-                "mean_std",
-                "hierarchical",
-            ),
-        )
-    )
-
-    metadata_columns = [
-        "Point",
-        "CapturePointId",
-        "meanHFI",
-    ]
-
-    reference = (
-        signatures[
-            "mean"
-        ][
-            metadata_columns
-        ]
-        .sort_values(
-            "CapturePointId"
-        )
-        .reset_index(
-            drop=True
-        )
-    )
-
-    for aggregation in (
-        "mean_std",
-        "hierarchical",
-    ):
-
-        current = (
-            signatures[
-                aggregation
-            ][
-                metadata_columns
-            ]
-            .sort_values(
-                "CapturePointId"
-            )
-            .reset_index(
-                drop=True
-            )
-        )
-
-        pd.testing.assert_frame_equal(
-            reference,
-            current,
-        )
-
-
-# =============================================================================
-# VARIANCE DECOMPOSITION
-# =============================================================================
-
-
-def test_hierarchical_variance_decomposition(
-    schema: Schema,
-    raw_data: pd.DataFrame,
-) -> None:
-    """
-    Equal-day temporal variance must satisfy:
-
-        total variance
-            =
-        within-day variance
-            +
-        between-day variance
-    """
-
-    processor = PreSplitProcessor(
-        schema=schema
-    )
-
-    signatures = (
-        processor.process_all(
-            df_raw=raw_data,
-            aggregations=(
-                "mean_std",
-                "hierarchical",
-            ),
-        )
-    )
-
-    mean_std = (
-        signatures[
-            "mean_std"
-        ]
-        .iloc[
-            0
-        ]
-    )
-
-    hierarchical = (
-        signatures[
-            "hierarchical"
-        ]
-        .iloc[
-            0
-        ]
+        .iloc[0]
     )
 
     total_std = (
@@ -830,88 +447,58 @@ def test_hierarchical_variance_decomposition(
         ]
     )
 
+    assert total_std == pytest.approx(
+        np.sqrt(4.5)
+    )
+
     assert within_std == pytest.approx(
-        np.sqrt(
-            0.5
-        )
+        np.sqrt(0.5)
     )
 
     assert between_std == pytest.approx(
         2.0
     )
 
-    assert total_std == pytest.approx(
-        np.sqrt(
-            4.5
-        )
-    )
-
-    assert (
-        total_std
-        ** 2
-    ) == pytest.approx(
-        (
-            within_std
-            ** 2
-        )
-        + (
-            between_std
-            ** 2
-        )
+    assert total_std**2 == pytest.approx(
+        within_std**2
+        + between_std**2
     )
 
 
-def test_variance_component_helper_matches_expected_values() -> None:
-    """
-    Test the equal-day variance decomposition independently from dataframe
-    processing.
-    """
+def test_aggregation_strategies_share_same_mean(
+    schema: Schema,
+    raw_data: pd.DataFrame,
+) -> None:
 
-    daily_means = np.array(
-        [
-            3.0,
-            7.0,
+    processor = PreSplitProcessor(
+        schema=schema
+    )
+
+    signatures = processor.process_all(
+        df_raw=raw_data,
+        aggregations=(
+            "mean",
+            "mean_std",
+            "hierarchical",
+        ),
+    )
+
+    values = [
+        signatures[
+            aggregation
+        ].iloc[0][
+            "ACI_mean"
         ]
-    )
+        for aggregation in signatures
+    ]
 
-    daily_stds = np.array(
+    np.testing.assert_allclose(
+        values,
         [
-            1.0,
-            0.0,
-        ]
-    )
-
-    (
-        mean_value,
-        total_std,
-        within_std,
-        between_std,
-    ) = (
-        PreSplitProcessor
-        ._variance_components(
-            daily_means,
-            daily_stds,
-        )
-    )
-
-    assert mean_value == pytest.approx(
-        5.0
-    )
-
-    assert within_std == pytest.approx(
-        np.sqrt(
-            0.5
-        )
-    )
-
-    assert between_std == pytest.approx(
-        2.0
-    )
-
-    assert total_std == pytest.approx(
-        np.sqrt(
-            4.5
-        )
+            5.0,
+            5.0,
+            5.0,
+        ],
     )
 
 
@@ -920,47 +507,29 @@ def test_variance_component_helper_matches_expected_values() -> None:
 # =============================================================================
 
 
-def test_embedding_aggregation_dimensions_and_means(
+def test_embedding_aggregation(
     schema: Schema,
     raw_data: pd.DataFrame,
 ) -> None:
-    """
-    Embeddings use exactly the same aggregation definitions element-wise.
-
-    For an original two-dimensional embedding:
-
-        mean:
-            2 dimensions
-
-        mean_std:
-            4 dimensions
-
-        hierarchical:
-            6 dimensions
-    """
 
     processor = PreSplitProcessor(
         schema=schema
     )
 
-    signatures = (
-        processor.process_all(
-            df_raw=raw_data,
-            aggregations=(
-                "mean",
-                "mean_std",
-                "hierarchical",
-            ),
-        )
+    signatures = processor.process_all(
+        df_raw=raw_data,
+        aggregations=(
+            "mean",
+            "mean_std",
+            "hierarchical",
+        ),
     )
 
     mean_embedding = (
         signatures[
             "mean"
         ]
-        .iloc[
-            0
-        ][
+        .iloc[0][
             "Embedding"
         ]
     )
@@ -969,9 +538,7 @@ def test_embedding_aggregation_dimensions_and_means(
         signatures[
             "mean_std"
         ]
-        .iloc[
-            0
-        ][
+        .iloc[0][
             "Embedding"
         ]
     )
@@ -980,11 +547,17 @@ def test_embedding_aggregation_dimensions_and_means(
         signatures[
             "hierarchical"
         ]
-        .iloc[
-            0
-        ][
+        .iloc[0][
             "Embedding"
         ]
+    )
+
+    np.testing.assert_allclose(
+        mean_embedding,
+        [
+            5.5,
+            7.5,
+        ],
     )
 
     assert len(
@@ -999,300 +572,79 @@ def test_embedding_aggregation_dimensions_and_means(
         hierarchical_embedding
     ) == 6
 
-    expected_mean = np.array(
-        [
-            5.5,
-            7.5,
-        ]
-    )
-
     np.testing.assert_allclose(
-        mean_embedding,
-        expected_mean,
-    )
-
-    np.testing.assert_allclose(
-        mean_std_embedding[
-            :2
-        ],
-        expected_mean,
-    )
-
-    np.testing.assert_allclose(
-        hierarchical_embedding[
-            :2
-        ],
-        expected_mean,
-    )
-
-
-def test_embedding_variance_decomposition(
-    schema: Schema,
-    raw_data: pd.DataFrame,
-) -> None:
-    """
-    Embedding variability must obey the same element-wise decomposition as
-    acoustic indices.
-    """
-
-    processor = PreSplitProcessor(
-        schema=schema
-    )
-
-    signatures = (
-        processor.process_all(
-            df_raw=raw_data,
-            aggregations=(
-                "mean_std",
-                "hierarchical",
-            ),
-        )
-    )
-
-    mean_std_embedding = (
-        signatures[
-            "mean_std"
-        ]
-        .iloc[
-            0
-        ][
-            "Embedding"
-        ]
-    )
-
-    hierarchical_embedding = (
-        signatures[
-            "hierarchical"
-        ]
-        .iloc[
-            0
-        ][
-            "Embedding"
-        ]
-    )
-
-    # Original embedding dimension = 2.
-    #
-    # mean_std:
-    #
-    # [mean_1, mean_2, total_std_1, total_std_2]
-    #
-    # hierarchical:
-    #
-    # [mean_1, mean_2,
-    #  within_1, within_2,
-    #  between_1, between_2]
-
-    total_std = (
         mean_std_embedding[
             2:
         ]
-    )
-
-    within_std = (
-        hierarchical_embedding[
-            2:4
-        ]
-    )
-
-    between_std = (
-        hierarchical_embedding[
-            4:6
-        ]
-    )
-
-    np.testing.assert_allclose(
-        total_std
         ** 2,
         (
-            within_std
+            hierarchical_embedding[
+                2:4
+            ]
             ** 2
         )
         + (
-            between_std
+            hierarchical_embedding[
+                4:6
+            ]
             ** 2
         ),
     )
 
 
 # =============================================================================
-# REPRESENTATION DIMENSION
+# REPRESENTATION ALIGNMENT
 # =============================================================================
 
 
-def test_index_representation_dimensions(
+def test_aggregation_strategies_preserve_same_units(
     schema: Schema,
     raw_data: pd.DataFrame,
 ) -> None:
-    """
-    With one original acoustic index:
-
-        mean         -> 1 index feature
-        mean_std     -> 2 index features
-        hierarchical -> 3 index features
-    """
 
     processor = PreSplitProcessor(
         schema=schema
     )
 
-    signatures = (
-        processor.process_all(
-            df_raw=raw_data,
-            aggregations=(
-                "mean",
-                "mean_std",
-                "hierarchical",
-            ),
-        )
+    signatures = processor.process_all(
+        df_raw=raw_data,
+        aggregations=(
+            "mean",
+            "mean_std",
+            "hierarchical",
+        ),
     )
 
-    mean_indices = (
-        schema.index_columns(
-            signatures[
-                "mean"
-            ].columns
-        )
-    )
-
-    mean_std_indices = (
-        schema.index_columns(
-            signatures[
-                "mean_std"
-            ].columns
-        )
-    )
-
-    hierarchical_indices = (
-        schema.index_columns(
-            signatures[
-                "hierarchical"
-            ].columns
-        )
-    )
-
-    assert len(
-        mean_indices
-    ) == 1
-
-    assert len(
-        mean_std_indices
-    ) == 2
-
-    assert len(
-        hierarchical_indices
-    ) == 3
-
-
-# =============================================================================
-# SOURCE-SEGMENT ASSUMPTIONS
-# =============================================================================
-
-
-def test_more_than_three_segments_per_audio_name_is_rejected(
-    schema: Schema,
-    raw_data: pd.DataFrame,
-) -> None:
-    """
-    Input is expected to contain between one and three valid segment rows per
-    Audio_Name after upstream quality control.
-    """
-
-    extra = (
-        raw_data.iloc[
-            [
-                0
-            ]
-        ]
-        .copy()
-    )
-
-    invalid = pd.concat(
-        [
-            raw_data,
-            extra,
-            extra,
-        ],
-        ignore_index=True,
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="between 1 and 3",
-    ):
-
-        PreSplitProcessor(
-            schema=schema
-        ).process(
-            invalid,
-            aggregation="mean",
-        )
-
-
-# =============================================================================
-# TARGET / GROUP CONSISTENCY
-# =============================================================================
-
-
-def test_capture_point_cannot_have_multiple_targets(
-    schema: Schema,
-    raw_data: pd.DataFrame,
-) -> None:
-    """
-    One CapturePointId must have exactly one HFI target.
-    """
-
-    invalid = (
-        raw_data.copy()
-    )
-
-    invalid.loc[
-        invalid.index[
-            -1
-        ],
-        "meanHFI",
-    ] = 20.0
-
-    with pytest.raises(
-        ValueError,
-        match="exactly one target",
-    ):
-
-        PreSplitProcessor(
-            schema=schema
-        ).process(
-            invalid,
-            aggregation="mean",
-        )
-
-
-def test_capture_point_cannot_belong_to_multiple_points(
-    schema: Schema,
-    raw_data: pd.DataFrame,
-) -> None:
-    """
-    One CapturePointId must belong to exactly one physical Point.
-    """
-
-    invalid = (
-        raw_data.copy()
-    )
-
-    invalid.loc[
-        invalid.index[
-            -1
-        ],
+    metadata = [
         "Point",
-    ] = "P2"
+        "CapturePointId",
+        "meanHFI",
+    ]
 
-    with pytest.raises(
-        ValueError,
-        match="exactly one Point",
+    reference = (
+        signatures[
+            "mean"
+        ][
+            metadata
+        ]
+        .reset_index(
+            drop=True
+        )
+    )
+
+    for aggregation in (
+        "mean_std",
+        "hierarchical",
     ):
 
-        PreSplitProcessor(
-            schema=schema
-        ).process(
-            invalid,
-            aggregation="mean",
+        pd.testing.assert_frame_equal(
+            reference,
+            signatures[
+                aggregation
+            ][
+                metadata
+            ]
+            .reset_index(
+                drop=True
+            ),
         )

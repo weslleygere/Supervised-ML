@@ -1,4 +1,5 @@
 import os
+
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -41,13 +42,19 @@ def _parse_csv_ints(
     """
 
     try:
+
         values = tuple(
-            int(item.strip())
-            for item in str(value).split(",")
+            int(
+                item.strip()
+            )
+            for item in str(
+                value
+            ).split(",")
             if item.strip()
         )
 
     except ValueError as exc:
+
         raise ValueError(
             f"Expected comma-separated integers, got: {value}"
         ) from exc
@@ -68,7 +75,14 @@ def _check_duplicates(
     Reject duplicated configuration values.
     """
 
-    if len(values) != len(set(values)):
+    if len(
+        values
+    ) != len(
+        set(
+            values
+        )
+    ):
+
         raise ValueError(
             f"{name} contains duplicated values: {values}"
         )
@@ -124,12 +138,14 @@ class DataConfig:
                     default="data/raw/data.csv",
                 )
             ),
+
             schema_path=str(
                 config(
                     "SCHEMA_PATH",
                     default="data/schema/schema.json",
                 )
             ),
+
             output_dir_base=str(
                 config(
                     "OUTPUT_DIR",
@@ -145,6 +161,7 @@ class DataConfig:
         if not os.path.isfile(
             self.data_path
         ):
+
             raise FileNotFoundError(
                 f"Dataset file not found: "
                 f"{self.data_path}"
@@ -152,7 +169,10 @@ class DataConfig:
 
         extension = (
             self.data_path
-            .rsplit(".", 1)[-1]
+            .rsplit(
+                ".",
+                1,
+            )[-1]
             .lower()
         )
 
@@ -177,6 +197,7 @@ class DataConfig:
         if not os.path.isfile(
             self.schema_path
         ):
+
             raise FileNotFoundError(
                 f"Schema file not found: "
                 f"{self.schema_path}"
@@ -185,6 +206,7 @@ class DataConfig:
         if not self.schema_path.lower().endswith(
             ".json"
         ):
+
             raise ValueError(
                 f"Schema file must be JSON: "
                 f"{self.schema_path}"
@@ -197,6 +219,7 @@ class DataConfig:
         if not os.path.exists(
             self.output_dir_base
         ):
+
             os.makedirs(
                 self.output_dir_base,
                 exist_ok=True,
@@ -205,6 +228,7 @@ class DataConfig:
         elif not os.path.isdir(
             self.output_dir_base
         ):
+
             raise NotADirectoryError(
                 f"OUTPUT_DIR is not a directory: "
                 f"{self.output_dir_base}"
@@ -247,7 +271,7 @@ class ModelConfig:
         feature representation
         aggregation strategy
         dimensionality reduction
-        PCA dimensionality
+        reduction dimensionality
         model hyperparameters
 
     Model family is part of the same Optuna search space as the remaining
@@ -263,6 +287,9 @@ class ModelConfig:
 
     pca_indices_candidates_config: str
     pca_embeddings_candidates_config: str
+
+    selection_indices_candidates_config: str
+    selection_embeddings_candidates_config: str
 
     models: list[RegressionModels] = field(
         init=False
@@ -285,6 +312,14 @@ class ModelConfig:
     )
 
     pca_embeddings_candidates: tuple[int, ...] = field(
+        init=False
+    )
+
+    selection_indices_candidates: tuple[int, ...] = field(
+        init=False
+    )
+
+    selection_embeddings_candidates: tuple[int, ...] = field(
         init=False
     )
 
@@ -341,11 +376,29 @@ class ModelConfig:
             )
         )
 
+        self.selection_indices_candidates = (
+            _check_duplicates(
+                _parse_csv_ints(
+                    self.selection_indices_candidates_config
+                ),
+                "SELECTION_INDICES_CANDIDATES",
+            )
+        )
+
+        self.selection_embeddings_candidates = (
+            _check_duplicates(
+                _parse_csv_ints(
+                    self.selection_embeddings_candidates_config
+                ),
+                "SELECTION_EMBEDDINGS_CANDIDATES",
+            )
+        )
+
         self._validate_random_state()
         self._validate_feature_sets()
         self._validate_aggregation_strategies()
         self._validate_reduction_methods()
-        self._validate_pca_candidates()
+        self._validate_reduction_candidates()
 
         from src.core.models.definitions import (
             AbstractModel,
@@ -367,39 +420,86 @@ class ModelConfig:
                     default="all",
                 )
             ),
+
             random_state=config(
                 "RANDOM_STATE",
                 default=42,
                 cast=int,
             ),
+
             feature_sets_config=str(
                 config(
                     "FEATURE_SETS",
-                    default="indices,embeddings,both",
+                    default=(
+                        "indices,"
+                        "embeddings,"
+                        "both"
+                    ),
                 )
             ),
+
             aggregation_strategies_config=str(
                 config(
                     "AGGREGATION_STRATEGIES",
-                    default="mean,mean_std,hierarchical",
+                    default=(
+                        "mean,"
+                        "mean_std,"
+                        "hierarchical,"
+                        "robust_daily,"
+                        "dawn_profile,"
+                        "dawn_trend"
+                    ),
                 )
             ),
+
             reduction_methods_config=str(
                 config(
                     "REDUCTION_METHODS",
-                    default="none,pca",
+                    default=(
+                        "none,"
+                        "pca,"
+                        "supervised_selection"
+                    ),
                 )
             ),
+
             pca_indices_candidates_config=str(
                 config(
                     "PCA_INDICES_CANDIDATES",
-                    default="6,8,10,12,14,16,18,20,22,24",
+                    default=(
+                        "2,4,6,8,10,12,"
+                        "16,20,24,32,40"
+                    ),
                 )
             ),
+
             pca_embeddings_candidates_config=str(
                 config(
                     "PCA_EMBEDDINGS_CANDIDATES",
-                    default="6,8,10,12,14,16,18,20,22,24",
+                    default=(
+                        "2,4,6,8,10,12,"
+                        "16,20,24,32,40"
+                    ),
+                )
+            ),
+
+            selection_indices_candidates_config=str(
+                config(
+                    "SELECTION_INDICES_CANDIDATES",
+                    default=(
+                        "2,4,6,8,10,12,"
+                        "16,20,24,32,40"
+                    ),
+                )
+            ),
+
+            selection_embeddings_candidates_config=str(
+                config(
+                    "SELECTION_EMBEDDINGS_CANDIDATES",
+                    default=(
+                        "2,4,6,8,10,12,"
+                        "16,20,24,32,40"
+                    ),
                 )
             ),
         )
@@ -417,6 +517,7 @@ class ModelConfig:
         )
 
         if value.lower() == "all":
+
             return list(
                 RegressionModels
             )
@@ -428,6 +529,7 @@ class ModelConfig:
         ]
 
         if not names:
+
             raise ValueError(
                 "MODELS must contain at least one model."
             )
@@ -450,6 +552,7 @@ class ModelConfig:
     ) -> RegressionModels:
 
         try:
+
             return RegressionModels[
                 name
             ]
@@ -475,6 +578,7 @@ class ModelConfig:
     ) -> None:
 
         if self.random_state < 0:
+
             raise ValueError(
                 "RANDOM_STATE must be >= 0, "
                 f"got: {self.random_state}"
@@ -491,16 +595,18 @@ class ModelConfig:
         }
 
         invalid = (
-            set(self.feature_sets)
+            set(
+                self.feature_sets
+            )
             - valid
         )
 
         if invalid:
+
             raise ValueError(
                 "FEATURE_SETS contains invalid values: "
                 f"{sorted(invalid)}. "
-                "Valid values are: "
-                "indices, embeddings, both."
+                f"Valid values are: {sorted(valid)}."
             )
 
     def _validate_aggregation_strategies(
@@ -511,19 +617,24 @@ class ModelConfig:
             "mean",
             "mean_std",
             "hierarchical",
+            "robust_daily",
+            "dawn_profile",
+            "dawn_trend",
         }
 
         invalid = (
-            set(self.aggregation_strategies)
+            set(
+                self.aggregation_strategies
+            )
             - valid
         )
 
         if invalid:
+
             raise ValueError(
                 "AGGREGATION_STRATEGIES contains invalid values: "
                 f"{sorted(invalid)}. "
-                "Valid values are: "
-                "mean, mean_std, hierarchical."
+                f"Valid values are: {sorted(valid)}."
             )
 
     def _validate_reduction_methods(
@@ -533,34 +644,51 @@ class ModelConfig:
         valid = {
             "none",
             "pca",
+            "supervised_selection",
         }
 
         invalid = (
-            set(self.reduction_methods)
+            set(
+                self.reduction_methods
+            )
             - valid
         )
 
         if invalid:
+
             raise ValueError(
                 "REDUCTION_METHODS contains invalid values: "
                 f"{sorted(invalid)}. "
-                "Valid values are: "
-                "none, pca."
+                f"Valid values are: {sorted(valid)}."
             )
 
-    def _validate_pca_candidates(
+    def _validate_reduction_candidates(
         self,
     ) -> None:
 
-        self._validate_positive_integers(
-            name="PCA_INDICES_CANDIDATES",
-            values=self.pca_indices_candidates,
-        )
+        for name, values in (
+            (
+                "PCA_INDICES_CANDIDATES",
+                self.pca_indices_candidates,
+            ),
+            (
+                "PCA_EMBEDDINGS_CANDIDATES",
+                self.pca_embeddings_candidates,
+            ),
+            (
+                "SELECTION_INDICES_CANDIDATES",
+                self.selection_indices_candidates,
+            ),
+            (
+                "SELECTION_EMBEDDINGS_CANDIDATES",
+                self.selection_embeddings_candidates,
+            ),
+        ):
 
-        self._validate_positive_integers(
-            name="PCA_EMBEDDINGS_CANDIDATES",
-            values=self.pca_embeddings_candidates,
-        )
+            self._validate_positive_integers(
+                name=name,
+                values=values,
+            )
 
     @staticmethod
     def _validate_positive_integers(
@@ -572,6 +700,7 @@ class ModelConfig:
             value <= 0
             for value in values
         ):
+
             raise ValueError(
                 f"{name} must contain only "
                 "positive integers."
@@ -582,6 +711,7 @@ class ModelConfig:
                 values
             )
         ) != values:
+
             raise ValueError(
                 f"{name} must be sorted "
                 "in increasing order."
@@ -647,16 +777,19 @@ class ValidationConfig:
                 default=0.20,
                 cast=float,
             ),
+
             cv_splits=config(
                 "CV_SPLITS",
                 default=5,
                 cast=int,
             ),
+
             cv_repeats=config(
                 "CV_REPEATS",
                 default=5,
                 cast=int,
             ),
+
             optuna_trials=config(
                 "OPTUNA_TRIALS",
                 default=400,
@@ -677,6 +810,7 @@ class ValidationConfig:
             < self.test_size
             < 1.0
         ):
+
             raise ValueError(
                 "TEST_SIZE must be between 0 and 1, "
                 f"got: {self.test_size}"
@@ -691,11 +825,13 @@ class ValidationConfig:
     ) -> None:
 
         if self.cv_splits < 2:
+
             raise ValueError(
                 "CV_SPLITS must be >= 2."
             )
 
         if self.cv_repeats < 1:
+
             raise ValueError(
                 "CV_REPEATS must be >= 1."
             )
@@ -709,6 +845,7 @@ class ValidationConfig:
     ) -> None:
 
         if self.optuna_trials < 1:
+
             raise ValueError(
                 "OPTUNA_TRIALS must be >= 1."
             )
@@ -740,6 +877,7 @@ class LoggingConfig:
             self.log_level.upper()
             not in valid_levels
         ):
+
             raise ValueError(
                 f"Invalid LOG_LEVEL: "
                 f"{self.log_level}"
@@ -757,6 +895,7 @@ class LoggingConfig:
                     default="INFO",
                 )
             ),
+
             debug=config(
                 "DEBUG",
                 default=False,
@@ -783,10 +922,21 @@ class Settings:
     ) -> "Settings":
 
         return cls(
-            data=DataConfig.from_env(),
-            model=ModelConfig.from_env(),
-            validation=ValidationConfig.from_env(),
-            logging=LoggingConfig.from_env(),
+            data=(
+                DataConfig.from_env()
+            ),
+
+            model=(
+                ModelConfig.from_env()
+            ),
+
+            validation=(
+                ValidationConfig.from_env()
+            ),
+
+            logging=(
+                LoggingConfig.from_env()
+            ),
         )
 
 

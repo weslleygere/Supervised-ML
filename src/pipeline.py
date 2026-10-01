@@ -1,9 +1,15 @@
 import logging
+import os
 
 from .config.settings import Settings
 from .core.data.data_loader import DataLoader
+from .core.data.temporal_audit import TemporalAudit
 from .core.evaluation.evaluator import ModelEvaluator
 from .core.evaluation.plots import save_evaluation_plots
+from .core.evaluation.result_analysis import (
+    save_result_analysis,
+)
+from .core.processors.aggregations import AcousticAggregator
 from .core.processors.presplit import PreSplitProcessor
 
 
@@ -22,24 +28,15 @@ class Pipeline:
     Steps
     -----
     1. Load data and schema.
-
-    2. Build all candidate acoustic representations at the
-       CapturePointId level.
-
-    3. Split independent Points once into:
-
-           development set
-           final test set
-
-    4. Select one complete machine-learning pipeline on the development set
-       using repeated grouped cross-validation and a single Optuna study.
-
-    5. Fit the selected pipeline using all development data.
-
-    6. Evaluate the selected pipeline once on the isolated final test set.
-
-    7. Generate manuscript-oriented figures from the saved scientific
-       outputs.
+    2. Build atomic Audio_Name observations.
+    3. Audit temporal sampling coverage.
+    4. Build daily acoustic statistics.
+    5. Build candidate CapturePointId representations.
+    6. Select one complete pipeline using repeated grouped CV.
+    7. Fit the selected pipeline on the complete development set.
+    8. Evaluate once on the isolated final test set.
+    9. Build report-oriented scientific analysis tables.
+    10. Generate publication-oriented figures.
     """
 
     def __init__(
@@ -58,12 +55,6 @@ class Pipeline:
     ) -> dict:
         """
         Run the complete supervised machine-learning experiment.
-
-        Returns
-        -------
-        dict
-            Main model-selection and final-evaluation artifacts returned by
-            ModelEvaluator.evaluate().
         """
 
         # =====================================================================
@@ -80,7 +71,6 @@ class Pipeline:
         )
 
         df_raw = loader.load_data()
-
         schema = loader.load_schema()
 
         logger.info(
@@ -89,21 +79,90 @@ class Pipeline:
         )
 
         # =====================================================================
-        # PRE-SPLIT ACOUSTIC REPRESENTATIONS
+        # PRE-SPLIT PROCESSING
         # =====================================================================
 
         processor = PreSplitProcessor(
             schema=schema
         )
 
-        signatures = processor.process_all(
-            df_raw=df_raw,
-            aggregations=(
+        audio = processor.prepare_audio(
+            df_raw
+        )
+
+        daily = processor.prepare_daily(
+            audio
+        )
+
+        # =====================================================================
+        # TEMPORAL AUDIT
+        # =====================================================================
+
+        audit = TemporalAudit(
+            schema=schema
+        ).build(
+            audio
+        )
+
+        reproducibility_dir = os.path.join(
+            self.settings.data.output_dir,
+            "reproducibility",
+        )
+
+        os.makedirs(
+            reproducibility_dir,
+            exist_ok=True,
+        )
+
+        audit[
+            "daily"
+        ].to_csv(
+            os.path.join(
+                reproducibility_dir,
+                "temporal_audit_daily.csv",
+            ),
+            index=False,
+        )
+
+        audit[
+            "capture"
+        ].to_csv(
+            os.path.join(
+                reproducibility_dir,
+                "temporal_audit_capture.csv",
+            ),
+            index=False,
+        )
+
+        logger.info(
+            "Temporal audit saved for %d atomic recordings",
+            len(
+                audio
+            ),
+        )
+
+        # =====================================================================
+        # ACOUSTIC REPRESENTATIONS
+        # =====================================================================
+
+        aggregator = AcousticAggregator(
+            schema=schema
+        )
+
+        signatures = {
+            aggregation:
+                aggregator.build(
+                    audio=audio,
+                    daily=daily,
+                    aggregation=aggregation,
+                )
+            for aggregation
+            in (
                 self.settings
                 .model
                 .aggregation_strategies
-            ),
-        )
+            )
+        }
 
         reference_aggregation = (
             self.settings
@@ -224,6 +283,18 @@ class Pipeline:
                 .pca_embeddings_candidates
             ),
 
+            selection_indices_candidates=(
+                self.settings
+                .model
+                .selection_indices_candidates
+            ),
+
+            selection_embeddings_candidates=(
+                self.settings
+                .model
+                .selection_embeddings_candidates
+            ),
+
             test_size=(
                 self.settings
                 .validation
@@ -258,7 +329,29 @@ class Pipeline:
         )
 
         # =====================================================================
-        # MANUSCRIPT-ORIENTED FIGURES
+        # SCIENTIFIC RESULT ANALYSIS
+        # =====================================================================
+
+        logger.info(
+            "Building report-oriented scientific analysis tables..."
+        )
+
+        analysis = save_result_analysis(
+            output_dir=(
+                self.settings.data.output_dir
+            ),
+            schema=schema,
+        )
+
+        logger.info(
+            "Scientific analysis complete: %d analysis tables created.",
+            len(
+                analysis
+            ),
+        )
+
+        # =====================================================================
+        # FIGURES
         # =====================================================================
 
         logger.info(
@@ -273,10 +366,18 @@ class Pipeline:
 
         logger.info(
             "Evaluation figures saved to %s",
-            (
-                self.settings.data.output_dir
-                + "/figures"
+            os.path.join(
+                self.settings.data.output_dir,
+                "figures",
             ),
         )
+
+        # =====================================================================
+        # RETURN
+        # =====================================================================
+
+        results[
+            "analysis"
+        ] = analysis
 
         return results

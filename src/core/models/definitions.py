@@ -6,13 +6,18 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from catboost import CatBoostRegressor
+from lightgbm import LGBMRegressor
+
 from sklearn.ensemble import (
     ExtraTreesRegressor,
     GradientBoostingRegressor,
     RandomForestRegressor,
 )
 from sklearn.exceptions import ConvergenceWarning
+from sklearn.kernel_ridge import KernelRidge
 from sklearn.linear_model import (
+    BayesianRidge,
     ElasticNet,
     Ridge,
 )
@@ -156,9 +161,6 @@ class RidgeRegressionModel(
 ):
     """
     Ridge Regression.
-
-    The SVD solver is used because it is numerically stable for
-    singular or ill-conditioned feature matrices.
     """
 
     def __init__(
@@ -185,7 +187,9 @@ class RidgeRegressionModel(
 
         self.model.fit(
             x,
-            self._target_values(y),
+            self._target_values(
+                y
+            ),
             sample_weight=sample_weight,
         )
 
@@ -242,7 +246,9 @@ class ElasticNetModel(
 
                 self.model.fit(
                     x,
-                    self._target_values(y),
+                    self._target_values(
+                        y
+                    ),
                     sample_weight=sample_weight,
                 )
 
@@ -263,8 +269,50 @@ class ElasticNetModel(
         )
 
 
+class BayesianRidgeModel(
+    AbstractModel
+):
+    """
+    Bayesian Ridge Regression.
+    """
+
+    def __init__(
+        self,
+        **params,
+    ) -> None:
+        super().__init__()
+
+        self.model = BayesianRidge(
+            **params
+        )
+
+    def _fit(
+        self,
+        x: pd.DataFrame,
+        y: pd.DataFrame,
+        sample_weight: np.ndarray | None = None,
+    ) -> None:
+
+        self.model.fit(
+            x,
+            self._target_values(
+                y
+            ),
+            sample_weight=sample_weight,
+        )
+
+    def _predict(
+        self,
+        x: pd.DataFrame,
+    ) -> np.ndarray:
+
+        return self.model.predict(
+            x
+        )
+
+
 # =============================================================================
-# KERNEL MODEL
+# KERNEL MODELS
 # =============================================================================
 
 
@@ -299,7 +347,9 @@ class SVRModel(
 
         self.model.fit(
             x,
-            self._target_values(y),
+            self._target_values(
+                y
+            ),
             sample_weight=sample_weight,
         )
 
@@ -308,6 +358,53 @@ class SVRModel(
                 "SVR reached the iteration limit "
                 "before convergence."
             )
+
+    def _predict(
+        self,
+        x: pd.DataFrame,
+    ) -> np.ndarray:
+
+        return self.model.predict(
+            x
+        )
+
+
+class KernelRidgeModel(
+    AbstractModel
+):
+    """
+    Kernel Ridge Regression.
+    """
+
+    def __init__(
+        self,
+        **params,
+    ) -> None:
+        super().__init__()
+
+        params.setdefault(
+            "kernel",
+            "rbf",
+        )
+
+        self.model = KernelRidge(
+            **params
+        )
+
+    def _fit(
+        self,
+        x: pd.DataFrame,
+        y: pd.DataFrame,
+        sample_weight: np.ndarray | None = None,
+    ) -> None:
+
+        self.model.fit(
+            x,
+            self._target_values(
+                y
+            ),
+            sample_weight=sample_weight,
+        )
 
     def _predict(
         self,
@@ -347,10 +444,8 @@ class RandomForestModel(
             -1,
         )
 
-        self.model = (
-            RandomForestRegressor(
-                **params
-            )
+        self.model = RandomForestRegressor(
+            **params
         )
 
     def _fit(
@@ -362,7 +457,9 @@ class RandomForestModel(
 
         self.model.fit(
             x,
-            self._target_values(y),
+            self._target_values(
+                y
+            ),
             sample_weight=sample_weight,
         )
 
@@ -399,10 +496,8 @@ class ExtraTreesModel(
             -1,
         )
 
-        self.model = (
-            ExtraTreesRegressor(
-                **params
-            )
+        self.model = ExtraTreesRegressor(
+            **params
         )
 
     def _fit(
@@ -414,7 +509,9 @@ class ExtraTreesModel(
 
         self.model.fit(
             x,
-            self._target_values(y),
+            self._target_values(
+                y
+            ),
             sample_weight=sample_weight,
         )
 
@@ -451,10 +548,8 @@ class GradientBoostingModel(
             AbstractModel.seed,
         )
 
-        self.model = (
-            GradientBoostingRegressor(
-                **params
-            )
+        self.model = GradientBoostingRegressor(
+            **params
         )
 
     def _fit(
@@ -466,7 +561,9 @@ class GradientBoostingModel(
 
         self.model.fit(
             x,
-            self._target_values(y),
+            self._target_values(
+                y
+            ),
             sample_weight=sample_weight,
         )
 
@@ -516,7 +613,128 @@ class XGBoostModel(
 
         self.model.fit(
             x,
-            self._target_values(y),
+            self._target_values(
+                y
+            ),
+            sample_weight=sample_weight,
+        )
+
+    def _predict(
+        self,
+        x: pd.DataFrame,
+    ) -> np.ndarray:
+
+        return self.model.predict(
+            x
+        )
+
+
+class LightGBMModel(
+    AbstractModel
+):
+    """
+    LightGBM Regressor.
+    """
+
+    def __init__(
+        self,
+        **params,
+    ) -> None:
+        super().__init__()
+
+        params.setdefault(
+            "random_state",
+            AbstractModel.seed,
+        )
+
+        params.setdefault(
+            "n_jobs",
+            -1,
+        )
+
+        params.setdefault(
+            "verbosity",
+            -1,
+        )
+
+        self.model = LGBMRegressor(
+            **params
+        )
+
+    def _fit(
+        self,
+        x: pd.DataFrame,
+        y: pd.DataFrame,
+        sample_weight: np.ndarray | None = None,
+    ) -> None:
+
+        self.model.fit(
+            x,
+            self._target_values(
+                y
+            ),
+            sample_weight=sample_weight,
+        )
+
+    def _predict(
+        self,
+        x: pd.DataFrame,
+    ) -> np.ndarray:
+
+        return self.model.predict(
+            x
+        )
+
+
+class CatBoostModel(
+    AbstractModel
+):
+    """
+    CatBoost Regressor.
+    """
+
+    def __init__(
+        self,
+        **params,
+    ) -> None:
+        super().__init__()
+
+        params.setdefault(
+            "random_seed",
+            AbstractModel.seed,
+        )
+
+        params.setdefault(
+            "thread_count",
+            -1,
+        )
+
+        params.setdefault(
+            "verbose",
+            False,
+        )
+
+        params.setdefault(
+            "allow_writing_files",
+            False,
+        )
+
+        self.model = CatBoostRegressor(
+            **params
+        )
+
+    def _fit(
+        self,
+        x: pd.DataFrame,
+        y: pd.DataFrame,
+        sample_weight: np.ndarray | None = None,
+    ) -> None:
+
+        self.model.fit(
+            x,
+            self._target_values(
+                y
+            ),
             sample_weight=sample_weight,
         )
 

@@ -1,0 +1,10 @@
+file,purpose,interpretation
+selected_pipeline_summary.csv,"Report-ready summary of the selected pipeline, development CV performance, final-test performance and baseline comparisons.",primary_result
+selected_cv_repeat_metrics.csv,"Point-balanced MAE, RMSE and R2 for each complete CV repetition and each method.",model_selection_stability
+selected_cv_prediction_stability.csv,Variation in the selected model prediction for each CapturePointId across repeated CV partitions.,stability_diagnostic
+final_test_baseline_comparison.csv,Paired CapturePointId-level errors and gains relative to mean and median baselines.,independent_test_diagnostic
+final_test_point_errors.csv,Error summaries at the independent Point level after first calculating error for each CapturePointId.,independent_test_primary_unit
+dataset_partition_summary.csv,Development/test sample sizes and HFI distribution including Point-balanced moments.,experimental_design_diagnostic
+search_status_summary.csv,"Numbers and fractions of complete, failed and pruned Optuna trials.",optimization_diagnostic
+top_pipeline_candidates.csv,Highest-performing observed complete configurations ranked by repeated-CV MAE.,adaptive_search_descriptive
+search_component_descriptive.csv,"Distribution of observed trial performance by model, feature set, aggregation and reduction.",descriptive_only_not_formal_component_comparison

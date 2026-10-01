@@ -35,11 +35,6 @@ def train_data() -> tuple[
     pd.DataFrame,
     pd.DataFrame,
 ]:
-    """
-    Simple training dataset with one CapturePointId per Point.
-
-    Equal Point weights therefore reduce to equal row weights.
-    """
 
     X = pd.DataFrame(
         {
@@ -123,12 +118,6 @@ def unequal_point_data() -> tuple[
     pd.DataFrame,
     pd.DataFrame,
 ]:
-    """
-    Training dataset where P1 contains two CapturePointIds.
-
-    Point-balanced preprocessing must ensure that P1 collectively has the
-    same total weight as P2 and P3.
-    """
 
     X = pd.DataFrame(
         {
@@ -193,6 +182,7 @@ def unequal_point_data() -> tuple[
 
 @pytest.fixture
 def test_data() -> pd.DataFrame:
+
     return pd.DataFrame(
         {
             "Point": [
@@ -246,10 +236,6 @@ def test_point_weights_give_each_point_equal_total_weight(
     schema: Schema,
     unequal_point_data,
 ) -> None:
-    """
-    Multiple CapturePointIds belonging to the same Point must divide that
-    Point's total preprocessing weight.
-    """
 
     X_train, _ = (
         unequal_point_data
@@ -261,10 +247,8 @@ def test_point_weights_give_each_point_equal_total_weight(
         reduction="none",
     )
 
-    weights = (
-        processor._point_weights(
-            X_train
-        )
+    weights = processor._point_weights(
+        X_train
     )
 
     weighted = X_train[
@@ -307,10 +291,6 @@ def test_point_weights_have_mean_one(
     schema: Schema,
     unequal_point_data,
 ) -> None:
-    """
-    Weight normalization must preserve relative Point weighting while keeping
-    the average sample weight equal to one.
-    """
 
     X_train, _ = (
         unequal_point_data
@@ -322,10 +302,8 @@ def test_point_weights_have_mean_one(
         reduction="none",
     )
 
-    weights = (
-        processor._point_weights(
-            X_train
-        )
+    weights = processor._point_weights(
+        X_train
     )
 
     assert weights.mean() == pytest.approx(
@@ -343,9 +321,6 @@ def test_index_scaler_is_fitted_only_on_training_data(
     train_data,
     test_data: pd.DataFrame,
 ) -> None:
-    """
-    Validation/test observations must never influence feature scaling.
-    """
 
     X_train, y_train = (
         train_data
@@ -408,10 +383,6 @@ def test_index_scaler_is_point_balanced(
     schema: Schema,
     unequal_point_data,
 ) -> None:
-    """
-    A Point with multiple CapturePointIds must not receive extra influence
-    when estimating feature means.
-    """
 
     X_train, y_train = (
         unequal_point_data
@@ -427,24 +398,6 @@ def test_index_scaler_is_point_balanced(
         X_train,
         y_train,
     )
-
-    # Raw Point weights:
-    #
-    # P1:
-    #     B1 = 1/2
-    #     B2 = 1/2
-    #
-    # P2:
-    #     B3 = 1
-    #
-    # P3:
-    #     B4 = 1
-    #
-    # Therefore:
-    #
-    # ACI weighted mean =
-    #
-    # (0*0.5 + 10*0.5 + 20*1 + 40*1) / 3
 
     expected_aci_mean = (
         (
@@ -476,8 +429,6 @@ def test_index_scaler_is_point_balanced(
         ),
     )
 
-    # Confirm that this is not simply the unweighted row mean.
-
     unweighted_mean = (
         X_train[
             [
@@ -503,9 +454,6 @@ def test_embedding_scaler_is_point_balanced(
     schema: Schema,
     unequal_point_data,
 ) -> None:
-    """
-    Embedding dimensions must use the same Point-balanced weighting.
-    """
 
     X_train, y_train = (
         unequal_point_data
@@ -558,9 +506,6 @@ def test_target_scaler_is_fitted_only_on_training_target(
     schema: Schema,
     train_data,
 ) -> None:
-    """
-    Target scaling must be fitted exclusively using training targets.
-    """
 
     X_train, y_train = (
         train_data
@@ -600,9 +545,6 @@ def test_target_scaler_is_point_balanced(
     schema: Schema,
     unequal_point_data,
 ) -> None:
-    """
-    The target transformation must give every Point the same total influence.
-    """
 
     X_train, y_train = (
         unequal_point_data
@@ -668,10 +610,6 @@ def test_target_inverse_transform_restores_original_scale(
     schema: Schema,
     train_data,
 ) -> None:
-    """
-    Predictions transformed back from model space must exactly return to the
-    original HFI scale.
-    """
 
     X_train, y_train = (
         train_data
@@ -708,7 +646,7 @@ def test_target_inverse_transform_restores_original_scale(
 
 
 # =============================================================================
-# NO PCA
+# NO REDUCTION
 # =============================================================================
 
 
@@ -716,10 +654,6 @@ def test_no_reduction_preserves_index_dimension(
     schema: Schema,
     train_data,
 ) -> None:
-    """
-    Without PCA, standardized acoustic indices retain their original
-    dimensionality and names.
-    """
 
     X_train, y_train = (
         train_data
@@ -757,9 +691,6 @@ def test_no_reduction_preserves_embedding_dimension(
     schema: Schema,
     train_data,
 ) -> None:
-    """
-    Without PCA, all standardized embedding dimensions are preserved.
-    """
 
     X_train, y_train = (
         train_data
@@ -801,10 +732,6 @@ def test_no_reduction_preserves_embedding_dimension(
 
 
 def test_weighted_pca_uses_weighted_center() -> None:
-    """
-    WeightedPCA must center the matrix according to sample weights rather than
-    using the ordinary row mean.
-    """
 
     matrix = np.array(
         [
@@ -853,10 +780,6 @@ def test_weighted_pca_uses_weighted_center() -> None:
 
 
 def test_weighted_pca_transformed_training_data_has_zero_weighted_mean() -> None:
-    """
-    PCA scores from the training matrix must be centered under the same
-    weights used to fit PCA.
-    """
 
     matrix = np.array(
         [
@@ -911,9 +834,6 @@ def test_pca_uses_exact_requested_dimension(
     schema: Schema,
     train_data,
 ) -> None:
-    """
-    A feasible PCA dimension must be fitted exactly as requested.
-    """
 
     X_train, y_train = (
         train_data
@@ -960,12 +880,6 @@ def test_invalid_pca_dimension_is_not_silently_reduced(
     schema: Schema,
     train_data,
 ) -> None:
-    """
-    PostSplitProcessor must reject an impossible selected PCA dimension.
-
-    Feasibility must be determined by the search space rather than silently
-    changing the selected pipeline.
-    """
 
     X_train, y_train = (
         train_data
@@ -989,6 +903,193 @@ def test_invalid_pca_dimension_is_not_silently_reduced(
 
 
 # =============================================================================
+# SUPERVISED FEATURE SELECTION
+# =============================================================================
+
+
+def test_supervised_selection_uses_exact_requested_index_dimension(
+    schema: Schema,
+    train_data,
+) -> None:
+
+    X_train, y_train = (
+        train_data
+    )
+
+    processor = PostSplitProcessor(
+        schema=schema,
+        feature_set="indices",
+        reduction="supervised_selection",
+        selection_indices_features=1,
+    )
+
+    X_processed, _ = (
+        processor.fit_transform(
+            X_train,
+            y_train,
+        )
+    )
+
+    assert X_processed.shape == (
+        len(
+            X_train
+        ),
+        1,
+    )
+
+    assert len(
+        processor
+        .index_selector
+        .selected_indices_
+    ) == 1
+
+
+def test_supervised_selection_uses_exact_requested_embedding_dimension(
+    schema: Schema,
+    train_data,
+) -> None:
+
+    X_train, y_train = (
+        train_data
+    )
+
+    processor = PostSplitProcessor(
+        schema=schema,
+        feature_set="embeddings",
+        reduction="supervised_selection",
+        selection_embeddings_features=2,
+    )
+
+    X_processed, _ = (
+        processor.fit_transform(
+            X_train,
+            y_train,
+        )
+    )
+
+    assert X_processed.shape == (
+        len(
+            X_train
+        ),
+        2,
+    )
+
+    assert len(
+        processor
+        .embedding_selector
+        .selected_indices_
+    ) == 2
+
+
+def test_supervised_selection_transform_reuses_fitted_selector(
+    schema: Schema,
+    train_data,
+    test_data: pd.DataFrame,
+) -> None:
+
+    X_train, y_train = (
+        train_data
+    )
+
+    processor = PostSplitProcessor(
+        schema=schema,
+        feature_set="embeddings",
+        reduction="supervised_selection",
+        selection_embeddings_features=2,
+    )
+
+    processor.fit_transform(
+        X_train,
+        y_train,
+    )
+
+    selected_before = (
+        processor
+        .embedding_selector
+        .selected_indices_
+        .copy()
+    )
+
+    scores_before = (
+        processor
+        .embedding_selector
+        .scores_
+        .copy()
+    )
+
+    X_test_processed = (
+        processor.transform(
+            test_data
+        )
+    )
+
+    np.testing.assert_array_equal(
+        processor
+        .embedding_selector
+        .selected_indices_,
+        selected_before,
+    )
+
+    np.testing.assert_allclose(
+        processor
+        .embedding_selector
+        .scores_,
+        scores_before,
+    )
+
+    assert X_test_processed.shape == (
+        len(
+            test_data
+        ),
+        2,
+    )
+
+
+def test_supervised_selection_processes_both_blocks_independently(
+    schema: Schema,
+    train_data,
+) -> None:
+
+    X_train, y_train = (
+        train_data
+    )
+
+    processor = PostSplitProcessor(
+        schema=schema,
+        feature_set="both",
+        reduction="supervised_selection",
+        selection_indices_features=1,
+        selection_embeddings_features=2,
+    )
+
+    X_processed, _ = (
+        processor.fit_transform(
+            X_train,
+            y_train,
+        )
+    )
+
+    assert X_processed.shape == (
+        len(
+            X_train
+        ),
+        3,
+    )
+
+    assert len(
+        processor
+        .index_selector
+        .selected_indices_
+    ) == 1
+
+    assert len(
+        processor
+        .embedding_selector
+        .selected_indices_
+    ) == 2
+
+
+# =============================================================================
 # BOTH FEATURE BLOCKS
 # =============================================================================
 
@@ -997,10 +1098,6 @@ def test_both_feature_blocks_are_processed_independently(
     schema: Schema,
     train_data,
 ) -> None:
-    """
-    Indices and embeddings must receive separate scaling and PCA before being
-    concatenated.
-    """
 
     X_train, y_train = (
         train_data
@@ -1054,6 +1151,193 @@ def test_both_feature_blocks_are_processed_independently(
 
 
 # =============================================================================
+# BLOCK BALANCING
+# =============================================================================
+
+
+def test_both_feature_blocks_have_equal_weighted_energy(
+    schema: Schema,
+    unequal_point_data,
+) -> None:
+    """
+    After independent preprocessing, indices and embeddings must contribute
+    the same weighted mean squared Euclidean norm when used together.
+    """
+
+    X_train, y_train = (
+        unequal_point_data
+    )
+
+    processor = PostSplitProcessor(
+        schema=schema,
+        feature_set="both",
+        reduction="none",
+    )
+
+    X_processed, _ = (
+        processor.fit_transform(
+            X_train,
+            y_train,
+        )
+    )
+
+    weights = processor._point_weights(
+        X_train
+    )
+
+    index_matrix = (
+        X_processed[
+            processor.processed_index_cols
+        ]
+        .to_numpy(
+            dtype=float
+        )
+    )
+
+    embedding_matrix = (
+        X_processed[
+            processor.processed_embedding_cols
+        ]
+        .to_numpy(
+            dtype=float
+        )
+    )
+
+    index_energy = np.average(
+        np.sum(
+            index_matrix
+            ** 2,
+            axis=1,
+        ),
+        weights=weights,
+    )
+
+    embedding_energy = np.average(
+        np.sum(
+            embedding_matrix
+            ** 2,
+            axis=1,
+        ),
+        weights=weights,
+    )
+
+    assert index_energy == pytest.approx(
+        1.0
+    )
+
+    assert embedding_energy == pytest.approx(
+        1.0
+    )
+
+    assert index_energy == pytest.approx(
+        embedding_energy
+    )
+
+
+def test_block_scales_are_fitted_on_training_and_reused(
+    schema: Schema,
+    train_data,
+    test_data: pd.DataFrame,
+) -> None:
+    """
+    Validation/test data must use exactly the block-normalization factors
+    learned from the training data.
+    """
+
+    X_train, y_train = (
+        train_data
+    )
+
+    processor = PostSplitProcessor(
+        schema=schema,
+        feature_set="both",
+        reduction="none",
+    )
+
+    processor.fit_transform(
+        X_train,
+        y_train,
+    )
+
+    index_scale_before = (
+        processor.index_block_scale_
+    )
+
+    embedding_scale_before = (
+        processor.embedding_block_scale_
+    )
+
+    X_test_processed = (
+        processor.transform(
+            test_data
+        )
+    )
+
+    assert (
+        processor.index_block_scale_
+        == pytest.approx(
+            index_scale_before
+        )
+    )
+
+    assert (
+        processor.embedding_block_scale_
+        == pytest.approx(
+            embedding_scale_before
+        )
+    )
+
+    raw_indices = (
+        test_data[
+            processor.index_cols
+        ]
+        .to_numpy(
+            dtype=float
+        )
+    )
+
+    expected_indices = (
+        processor
+        .index_scaler
+        .transform(
+            raw_indices
+        )
+        / index_scale_before
+    )
+
+    raw_embeddings = np.stack(
+        test_data[
+            schema.embedding
+        ].to_numpy()
+    ).astype(
+        float
+    )
+
+    expected_embeddings = (
+        processor
+        .embedding_scaler
+        .transform(
+            raw_embeddings
+        )
+        / embedding_scale_before
+    )
+
+    np.testing.assert_allclose(
+        X_test_processed[
+            processor.processed_index_cols
+        ].to_numpy(),
+        expected_indices,
+    )
+
+    np.testing.assert_allclose(
+        X_test_processed[
+            processor.processed_embedding_cols
+        ].to_numpy(),
+        expected_embeddings,
+    )
+
+
+# =============================================================================
 # VALIDATION / TEST TRANSFORMATION
 # =============================================================================
 
@@ -1063,9 +1347,6 @@ def test_transform_does_not_refit_scaler(
     train_data,
     test_data: pd.DataFrame,
 ) -> None:
-    """
-    transform() must reuse feature scaling learned from training data.
-    """
 
     X_train, y_train = (
         train_data
@@ -1104,9 +1385,6 @@ def test_transform_does_not_refit_pca(
     train_data,
     test_data: pd.DataFrame,
 ) -> None:
-    """
-    transform() must reuse PCA fitted on training observations.
-    """
 
     X_train, y_train = (
         train_data
@@ -1175,66 +1453,75 @@ def test_transform_does_not_refit_pca(
 
 
 # =============================================================================
-# PCA CONFIGURATION
+# REDUCTION CONFIGURATION
 # =============================================================================
 
 
 def test_pca_requires_components_for_active_index_block(
     schema: Schema,
-    train_data,
 ) -> None:
-    """
-    PCA cannot be applied to indices without an explicit selected dimension.
-    """
-
-    X_train, y_train = (
-        train_data
-    )
-
-    processor = PostSplitProcessor(
-        schema=schema,
-        feature_set="indices",
-        reduction="pca",
-        pca_indices_components=None,
-    )
 
     with pytest.raises(
-        ValueError
+        ValueError,
+        match="indices block",
     ):
 
-        processor.fit_transform(
-            X_train,
-            y_train,
+        PostSplitProcessor(
+            schema=schema,
+            feature_set="indices",
+            reduction="pca",
+            pca_indices_components=None,
         )
 
 
 def test_pca_requires_components_for_active_embedding_block(
     schema: Schema,
-    train_data,
 ) -> None:
-    """
-    PCA cannot be applied to embeddings without an explicit selected
-    dimension.
-    """
-
-    X_train, y_train = (
-        train_data
-    )
-
-    processor = PostSplitProcessor(
-        schema=schema,
-        feature_set="embeddings",
-        reduction="pca",
-        pca_embeddings_components=None,
-    )
 
     with pytest.raises(
-        ValueError
+        ValueError,
+        match="embedding block",
     ):
 
-        processor.fit_transform(
-            X_train,
-            y_train,
+        PostSplitProcessor(
+            schema=schema,
+            feature_set="embeddings",
+            reduction="pca",
+            pca_embeddings_components=None,
+        )
+
+
+def test_supervised_selection_requires_dimension_for_active_index_block(
+    schema: Schema,
+) -> None:
+
+    with pytest.raises(
+        ValueError,
+        match="indices block",
+    ):
+
+        PostSplitProcessor(
+            schema=schema,
+            feature_set="indices",
+            reduction="supervised_selection",
+            selection_indices_features=None,
+        )
+
+
+def test_supervised_selection_requires_dimension_for_active_embedding_block(
+    schema: Schema,
+) -> None:
+
+    with pytest.raises(
+        ValueError,
+        match="embedding block",
+    ):
+
+        PostSplitProcessor(
+            schema=schema,
+            feature_set="embeddings",
+            reduction="supervised_selection",
+            selection_embeddings_features=None,
         )
 
 
@@ -1247,9 +1534,6 @@ def test_misaligned_training_indices_are_rejected(
     schema: Schema,
     train_data,
 ) -> None:
-    """
-    Feature and target rows must remain explicitly aligned.
-    """
 
     X_train, y_train = (
         train_data
@@ -1285,9 +1569,6 @@ def test_non_finite_features_are_rejected(
     schema: Schema,
     train_data,
 ) -> None:
-    """
-    NaN or infinite acoustic features must not silently enter preprocessing.
-    """
 
     X_train, y_train = (
         train_data
@@ -1323,9 +1604,6 @@ def test_non_finite_target_is_rejected(
     schema: Schema,
     train_data,
 ) -> None:
-    """
-    NaN or infinite HFI values must be rejected before model fitting.
-    """
 
     X_train, y_train = (
         train_data

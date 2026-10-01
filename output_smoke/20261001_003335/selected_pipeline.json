@@ -1,0 +1,25 @@
+{
+  "selected_trial": 0,
+  "selection_objective": {
+    "metric": "point_balanced_MAE",
+    "CV_MAE": 0.9652143925946461,
+    "CV_MAE_std": 0.018396171955972835
+  },
+  "pipeline": {
+    "model": "RIDGE_REGRESSION",
+    "feature_set": "embeddings",
+    "aggregation": "dawn_profile",
+    "reduction": "supervised_selection",
+    "pca_indices_components": null,
+    "pca_embeddings_components": null,
+    "model_params": {
+      "alpha": 5309.5322690092235
+    },
+    "selection_indices_features": null,
+    "selection_embeddings_features": 40
+  },
+  "raw_feature_count": 2048,
+  "model_feature_count": 40,
+  "final_fit_time": 0.0015341970138251781,
+  "final_prediction_time": 0.000613359035924077
+}

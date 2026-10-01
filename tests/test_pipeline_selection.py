@@ -137,7 +137,7 @@ def signatures(
     Minimal aligned acoustic representation.
 
     These tests target model-selection logic rather than aggregation logic,
-    which is tested separately in test_presplit.py.
+    which is tested separately.
     """
 
     return {
@@ -188,6 +188,16 @@ def evaluator(
             4,
         ),
 
+        selection_indices_candidates=(
+            1,
+            2,
+        ),
+
+        selection_embeddings_candidates=(
+            1,
+            2,
+        ),
+
         test_size=0.25,
 
         cv_splits=2,
@@ -207,10 +217,6 @@ def test_development_test_split_has_no_point_overlap(
     evaluator: ModelEvaluator,
     reference_data: pd.DataFrame,
 ) -> None:
-    """
-    A physical Point must belong entirely to either development or final
-    test data.
-    """
 
     (
         development_bags,
@@ -260,10 +266,6 @@ def test_development_test_split_keeps_all_captures_of_point_together(
     evaluator: ModelEvaluator,
     reference_data: pd.DataFrame,
 ) -> None:
-    """
-    Multiple CapturePointIds belonging to the same Point must never be split
-    between development and final test sets.
-    """
 
     (
         _,
@@ -292,12 +294,6 @@ def test_test_size_is_applied_to_independent_points(
     evaluator: ModelEvaluator,
     reference_data: pd.DataFrame,
 ) -> None:
-    """
-    TEST_SIZE is interpreted using independent Points rather than
-    CapturePointIds.
-
-    Eight Points with TEST_SIZE=0.25 should reserve two Points.
-    """
 
     (
         _,
@@ -325,9 +321,6 @@ def test_development_test_split_is_reproducible(
     evaluator: ModelEvaluator,
     reference_data: pd.DataFrame,
 ) -> None:
-    """
-    A fixed RANDOM_STATE must produce exactly the same holdout split.
-    """
 
     first = (
         evaluator
@@ -374,10 +367,6 @@ def test_cv_has_no_point_overlap(
     evaluator: ModelEvaluator,
     reference_data: pd.DataFrame,
 ) -> None:
-    """
-    No physical Point may occur simultaneously in CV training and
-    validation data.
-    """
 
     (
         development_bags,
@@ -434,9 +423,6 @@ def test_final_test_bags_never_enter_cv(
     evaluator: ModelEvaluator,
     reference_data: pd.DataFrame,
 ) -> None:
-    """
-    Final-test CapturePointIds must never enter model-selection CV.
-    """
 
     (
         development_bags,
@@ -482,11 +468,6 @@ def test_expected_number_of_cv_splits_is_created(
     evaluator: ModelEvaluator,
     reference_data: pd.DataFrame,
 ) -> None:
-    """
-    Total CV partitions must equal:
-
-        CV_REPEATS × CV_SPLITS
-    """
 
     (
         development_bags,
@@ -520,13 +501,6 @@ def test_each_repeat_produces_complete_oof_coverage(
     evaluator: ModelEvaluator,
     reference_data: pd.DataFrame,
 ) -> None:
-    """
-    Within every CV repetition, each development CapturePointId must appear
-    exactly once in validation.
-
-    Therefore the pooled validation predictions form one complete OOF
-    prediction set.
-    """
 
     (
         development_bags,
@@ -589,9 +563,6 @@ def test_repeated_cv_splits_are_reproducible(
     evaluator: ModelEvaluator,
     reference_data: pd.DataFrame,
 ) -> None:
-    """
-    The complete set of repeated CV partitions must be reproducible.
-    """
 
     (
         development_bags,
@@ -634,12 +605,13 @@ def test_all_trials_receive_exactly_the_same_cv_splits(
     monkeypatch,
 ) -> None:
     """
-    Candidate pipelines must be compared on exactly the same precomputed
-    train/validation partitions.
+    Every Optuna candidate and the final OOF reconstruction of the selected
+    pipeline must use exactly the same precomputed CV partitions.
     """
 
     received_split_ids = []
     received_split_structures = []
+    received_trial_numbers = []
 
     def fake_evaluate_configuration(
         signatures,
@@ -652,6 +624,10 @@ def test_all_trials_receive_exactly_the_same_cv_splits(
             id(
                 cv_splits
             )
+        )
+
+        received_trial_numbers.append(
+            trial_number
         )
 
         received_split_structures.append(
@@ -812,9 +788,6 @@ def test_all_trials_receive_exactly_the_same_cv_splits(
 
             "prediction_time":
                 0.0,
-
-            "n_model_features":
-                1,
         }
 
     monkeypatch.setattr(
@@ -833,10 +806,16 @@ def test_all_trials_receive_exactly_the_same_cv_splits(
         signatures
     )
 
+    # Three Optuna trials plus one reconstruction of the selected trial.
     assert len(
         received_split_ids
-    ) == evaluator.optuna_trials
+    ) == (
+        evaluator.optuna_trials
+        + 1
+    )
 
+    # All evaluations, including reconstruction, receive the exact same
+    # frozen CV split object.
     assert len(
         set(
             received_split_ids
@@ -852,10 +831,17 @@ def test_all_trials_receive_exactly_the_same_cv_splits(
     assert all(
         structure
         == first_structure
-        for structure in (
-            received_split_structures
-        )
+        for structure
+        in received_split_structures
     )
+
+    # Scores are trial_number + 1, so trial 0 is selected and reconstructed.
+    assert received_trial_numbers == [
+        0,
+        1,
+        2,
+        0,
+    ]
 
 
 # =============================================================================
@@ -871,7 +857,11 @@ def test_pipeline_is_selected_by_cv_mae_only(
     """
     Pipeline selection must depend exclusively on development CV MAE.
 
-    Final-test evaluation occurs only after Optuna has selected a trial.
+    After selection, the winning configuration is evaluated once more on the
+    same frozen CV partitions only to reconstruct its OOF predictions.
+
+    Final-test evaluation occurs after selection and cannot influence which
+    trial wins.
     """
 
     scores = {
@@ -1039,8 +1029,8 @@ def test_pipeline_is_selected_by_cv_mae_only(
             "predictions":
                 predictions,
 
-            # Deliberately poor test performance.
-            # It must have no influence on trial selection.
+            # Deliberately poor independent-test performance.
+            # It must not affect model selection.
             "metrics":
                 RegressionMetrics(
                     mae=999.0,
@@ -1053,9 +1043,6 @@ def test_pipeline_is_selected_by_cv_mae_only(
 
             "prediction_time":
                 0.0,
-
-            "n_model_features":
-                1,
         }
 
     monkeypatch.setattr(
@@ -1090,16 +1077,33 @@ def test_pipeline_is_selected_by_cv_mae_only(
         1.0
     )
 
+    # Trial 1 is evaluated twice:
+    #
+    # first during CASH optimization,
+    # then once more to reconstruct its OOF predictions.
+    #
+    # The final test comes strictly afterwards.
     assert events == [
         "trial_0",
         "trial_1",
         "trial_2",
+        "trial_1",
         "final_test",
     ]
 
     assert len(
         final_configurations
     ) == 1
+
+    assert final_configurations[
+        0
+    ][
+        "model"
+    ] == result[
+        "best_configuration"
+    ][
+        "model"
+    ]
 
 
 # =============================================================================
@@ -1110,10 +1114,6 @@ def test_pipeline_is_selected_by_cv_mae_only(
 def test_point_weights_give_each_point_equal_total_weight(
     evaluator: ModelEvaluator,
 ) -> None:
-    """
-    Multiple CapturePointIds from one physical Point must collectively receive
-    the same total weight as a Point represented by one CapturePointId.
-    """
 
     df = pd.DataFrame(
         {
@@ -1188,10 +1188,6 @@ def test_point_weights_give_each_point_equal_total_weight(
 def test_baselines_are_point_balanced(
     evaluator: ModelEvaluator,
 ) -> None:
-    """
-    Point-balanced baselines must not give extra influence to Points that
-    contain multiple CapturePointIds.
-    """
 
     df = pd.DataFrame(
         {
@@ -1225,12 +1221,6 @@ def test_baselines_are_point_balanced(
         df
     )
 
-    # P1 contributes a Point-level average of 5.
-    #
-    # Equal-Point mean:
-    #
-    #     (5 + 50 + 100) / 3
-
     expected_mean = (
         5.0
         + 50.0
@@ -1254,9 +1244,6 @@ def test_baselines_are_point_balanced(
 def test_metrics_give_each_point_equal_total_weight(
     evaluator: ModelEvaluator,
 ) -> None:
-    """
-    A Point represented by multiple CapturePointIds must not dominate MAE.
-    """
 
     df = pd.DataFrame(
         {
@@ -1296,13 +1283,6 @@ def test_metrics_give_each_point_equal_total_weight(
         )
     )
 
-    # P1 error = 10
-    # P2 error = 0
-    #
-    # Point-balanced MAE:
-    #
-    #     (10 + 0) / 2 = 5
-
     assert metrics.mae == pytest.approx(
         5.0
     )
@@ -1316,9 +1296,6 @@ def test_metrics_give_each_point_equal_total_weight(
 def test_raw_feature_count_tracks_aggregation_dimensionality(
     evaluator: ModelEvaluator,
 ) -> None:
-    """
-    Raw dimensionality must reflect the selected representation before PCA.
-    """
 
     feature_dimensions = {
         "mean": {
@@ -1373,21 +1350,12 @@ def test_raw_feature_count_tracks_aggregation_dimensionality(
         ),
     )
 
-    assert count == (
-        180
-        + 1536
-    )
-
     assert count == 1716
 
 
-def test_model_feature_count_equals_raw_count_without_pca(
+def test_model_feature_count_equals_raw_count_without_reduction(
     evaluator: ModelEvaluator,
 ) -> None:
-    """
-    Without dimensionality reduction, the regression model receives all raw
-    features.
-    """
 
     feature_dimensions = {
         "hierarchical": {
@@ -1434,10 +1402,6 @@ def test_model_feature_count_equals_raw_count_without_pca(
 def test_model_feature_count_uses_pca_components(
     evaluator: ModelEvaluator,
 ) -> None:
-    """
-    With PCA, model dimensionality must equal the sum of the retained
-    components from the active feature blocks.
-    """
 
     feature_dimensions = {
         "hierarchical": {
@@ -1490,6 +1454,154 @@ def test_model_feature_count_uses_pca_components(
     assert model_count == 36
 
 
+def test_model_feature_count_uses_supervised_selection_dimensions(
+    evaluator: ModelEvaluator,
+) -> None:
+
+    feature_dimensions = {
+        "hierarchical": {
+            "indices":
+                180,
+            "embeddings":
+                1536,
+        }
+    }
+
+    configuration = {
+        "model":
+            RegressionModels.SVR,
+
+        "feature_set":
+            "both",
+
+        "aggregation":
+            "hierarchical",
+
+        "reduction":
+            "supervised_selection",
+
+        "pca_indices_components":
+            None,
+
+        "pca_embeddings_components":
+            None,
+
+        "selection_indices_features":
+            12,
+
+        "selection_embeddings_features":
+            40,
+
+        "model_params":
+            {},
+    }
+
+    raw_count = evaluator._raw_feature_count(
+        configuration=configuration,
+        feature_dimensions=(
+            feature_dimensions
+        ),
+    )
+
+    model_count = evaluator._model_feature_count(
+        configuration=configuration,
+        feature_dimensions=(
+            feature_dimensions
+        ),
+    )
+
+    assert raw_count == 1716
+
+    assert model_count == 52
+
+
+# =============================================================================
+# SUPERVISED SELECTION CV INTEGRATION
+# =============================================================================
+
+
+def test_supervised_selection_runs_inside_cv(
+    evaluator: ModelEvaluator,
+    reference_data: pd.DataFrame,
+) -> None:
+    """
+    Supervised selection must run successfully inside the fixed CV loop.
+
+    Feature ranking is fitted separately on each training fold by the
+    PostSplitProcessor.
+    """
+
+    splits = evaluator._make_repeated_cv_splits(
+        reference_data
+    )
+
+    configuration = {
+        "model":
+            RegressionModels.RIDGE_REGRESSION,
+
+        "feature_set":
+            "indices",
+
+        "aggregation":
+            "mean",
+
+        "reduction":
+            "supervised_selection",
+
+        "pca_indices_components":
+            None,
+
+        "pca_embeddings_components":
+            None,
+
+        "selection_indices_features":
+            1,
+
+        "selection_embeddings_features":
+            None,
+
+        "model_params": {
+            "alpha":
+                1.0,
+        },
+    }
+
+    result = evaluator._evaluate_configuration(
+        signatures={
+            "mean":
+                reference_data
+        },
+        configuration=configuration,
+        cv_splits=splits,
+        trial_number=0,
+    )
+
+    assert len(
+        result[
+            "repeat_metrics"
+        ]
+    ) == evaluator.cv_repeats
+
+    assert len(
+        result[
+            "oof_predictions"
+        ]
+    ) == (
+        len(
+            reference_data
+        )
+        * evaluator.cv_repeats
+    )
+
+    assert np.isfinite(
+        result[
+            "summary"
+        ][
+            "CV_MAE"
+        ]
+    )
+
+
 # =============================================================================
 # CONFIGURATION SERIALIZATION
 # =============================================================================
@@ -1498,10 +1610,6 @@ def test_model_feature_count_uses_pca_components(
 def test_pipeline_configuration_serialization_roundtrip(
     evaluator: ModelEvaluator,
 ) -> None:
-    """
-    A configuration stored in Optuna user attributes must be recoverable
-    without changing its meaning.
-    """
 
     configuration = {
         "model":
@@ -1576,3 +1684,151 @@ def test_pipeline_configuration_serialization_roundtrip(
     ] == configuration[
         "model_params"
     ]
+
+
+def test_supervised_selection_configuration_serialization_roundtrip(
+    evaluator: ModelEvaluator,
+) -> None:
+    """
+    Supervised-selection dimensionalities must survive Optuna
+    serialization/restoration unchanged.
+    """
+
+    configuration = {
+        "model":
+            RegressionModels.LIGHTGBM,
+
+        "feature_set":
+            "both",
+
+        "aggregation":
+            "dawn_profile",
+
+        "reduction":
+            "supervised_selection",
+
+        "pca_indices_components":
+            None,
+
+        "pca_embeddings_components":
+            None,
+
+        "selection_indices_features":
+            8,
+
+        "selection_embeddings_features":
+            32,
+
+        "model_params": {
+            "n_estimators":
+                300,
+
+            "learning_rate":
+                0.05,
+        },
+    }
+
+    serialized = evaluator._serializable_config(
+        configuration
+    )
+
+    assert serialized[
+        "model"
+    ] == "LIGHTGBM"
+
+    assert serialized[
+        "selection_indices_features"
+    ] == 8
+
+    assert serialized[
+        "selection_embeddings_features"
+    ] == 32
+
+    restored = (
+        evaluator
+        ._configuration_from_serialized(
+            serialized
+        )
+    )
+
+    assert restored[
+        "model"
+    ] == RegressionModels.LIGHTGBM
+
+    assert restored[
+        "reduction"
+    ] == "supervised_selection"
+
+    assert restored[
+        "selection_indices_features"
+    ] == 8
+
+    assert restored[
+        "selection_embeddings_features"
+    ] == 32
+
+    assert restored[
+        "model_params"
+    ] == configuration[
+        "model_params"
+    ]
+
+
+def test_config_columns_expose_supervised_selection_dimensions(
+    evaluator: ModelEvaluator,
+) -> None:
+
+    configuration = {
+        "model":
+            RegressionModels.CATBOOST,
+
+        "feature_set":
+            "both",
+
+        "aggregation":
+            "dawn_trend",
+
+        "reduction":
+            "supervised_selection",
+
+        "pca_indices_components":
+            None,
+
+        "pca_embeddings_components":
+            None,
+
+        "selection_indices_features":
+            10,
+
+        "selection_embeddings_features":
+            24,
+
+        "model_params": {
+            "iterations":
+                400,
+        },
+    }
+
+    columns = evaluator._config_columns(
+        configuration
+    )
+
+    assert columns[
+        "model"
+    ] == "CATBOOST"
+
+    assert columns[
+        "selection_indices_features"
+    ] == 10
+
+    assert columns[
+        "selection_embeddings_features"
+    ] == 24
+
+    assert columns[
+        "pca_indices_components"
+    ] is None
+
+    assert columns[
+        "pca_embeddings_components"
+    ] is None
