@@ -105,6 +105,9 @@ class DataConfig:
         init=False
     )
 
+    min_capture_days: int = 7
+    max_capture_window_days: int = 28
+
     DATA_EXTENSIONS = frozenset(
         {
             "csv",
@@ -121,6 +124,7 @@ class DataConfig:
         self._validate_dataset_file()
         self._validate_schema_file()
         self._validate_output_base()
+        self._validate_temporal_curation()
 
         self.output_dir = (
             self._create_output_dir()
@@ -152,7 +156,37 @@ class DataConfig:
                     default="output",
                 )
             ),
+
+            min_capture_days=config(
+                "MIN_CAPTURE_DAYS",
+                default=7,
+                cast=int,
+            ),
+
+            max_capture_window_days=config(
+                "MAX_CAPTURE_WINDOW_DAYS",
+                default=28,
+                cast=int,
+            ),
         )
+
+    def _validate_temporal_curation(
+        self,
+    ) -> None:
+
+        if self.min_capture_days < 1:
+            raise ValueError(
+                "MIN_CAPTURE_DAYS must be >= 1."
+            )
+
+        if (
+            self.max_capture_window_days
+            < self.min_capture_days
+        ):
+            raise ValueError(
+                "MAX_CAPTURE_WINDOW_DAYS must be >= "
+                "MIN_CAPTURE_DAYS."
+            )
 
     def _validate_dataset_file(
         self,
@@ -752,6 +786,7 @@ class ValidationConfig:
     """
 
     test_size: float
+    hfi_strata: int
 
     cv_splits: int
     cv_repeats: int
@@ -763,6 +798,7 @@ class ValidationConfig:
     ) -> None:
 
         self._validate_test_size()
+        self._validate_hfi_strata()
         self._validate_cv()
         self._validate_optuna()
 
@@ -776,6 +812,12 @@ class ValidationConfig:
                 "TEST_SIZE",
                 default=0.20,
                 cast=float,
+            ),
+
+            hfi_strata=config(
+                "HFI_STRATA",
+                default=4,
+                cast=int,
             ),
 
             cv_splits=config(
@@ -814,6 +856,15 @@ class ValidationConfig:
             raise ValueError(
                 "TEST_SIZE must be between 0 and 1, "
                 f"got: {self.test_size}"
+            )
+
+    def _validate_hfi_strata(
+        self,
+    ) -> None:
+
+        if self.hfi_strata < 2:
+            raise ValueError(
+                "HFI_STRATA must be >= 2."
             )
 
     # =========================================================================

@@ -1,0 +1,1224 @@
+diff --git a/src/core/data/temporal_curation.py b/src/core/data/temporal_curation.py
+new file mode 100644
+--- /dev/null
++++ b/src/core/data/temporal_curation.py
+@@
++import pandas as pd
++
++from src.core.data.schema import Schema
++
++
++# =============================================================================
++# TEMPORAL CURATION
++# =============================================================================
++
++
++class TemporalCurator:
++    """
++    Apply pre-specified temporal eligibility rules per CapturePointId.
++
++    A CapturePointId is retained only when at least ``min_observed_days``
++    distinct recording dates are available. A date counts as observed when
++    at least one atomic Audio_Name observation is present.
++
++    When the temporal span of a CapturePointId exceeds
++    ``max_window_days`` calendar days, the first chronological window of
++    that length containing at least ``min_observed_days`` observed dates is
++    retained. The number of days used is therefore not fixed: all observed
++    days inside the selected window are preserved.
++    """
++
++    def __init__(
++        self,
++        schema: Schema,
++        min_observed_days: int = 7,
++        max_window_days: int = 28,
++    ) -> None:
++
++        if min_observed_days < 1:
++            raise ValueError(
++                "min_observed_days must be >= 1."
++            )
++
++        if max_window_days < min_observed_days:
++            raise ValueError(
++                "max_window_days must be >= min_observed_days."
++            )
++
++        self.schema = schema
++        self.min_observed_days = min_observed_days
++        self.max_window_days = max_window_days
++
++    def curate(
++        self,
++        audio: pd.DataFrame,
++    ) -> tuple[pd.DataFrame, pd.DataFrame]:
++        """
++        Return curated atomic observations and a CapturePointId manifest.
++        """
++
++        if audio.empty:
++            raise ValueError(
++                "Cannot curate an empty acoustic dataset."
++            )
++
++        df = audio.copy()
++
++        if "Date" not in df.columns:
++            df["Date"] = (
++                pd.to_datetime(
++                    df[
++                        self.schema.datetime
++                    ]
++                )
++                .dt.date
++            )
++
++        df["_curation_date"] = (
++            pd.to_datetime(
++                df["Date"]
++            )
++            .dt.normalize()
++        )
++
++        retained_frames = []
++        manifest_rows = []
++
++        keys = [
++            self.schema.group,
++            self.schema.bag,
++        ]
++
++        for (
++            point,
++            bag,
++        ), capture in df.groupby(
++            keys,
++            sort=False,
++        ):
++
++            dates = pd.DatetimeIndex(
++                capture[
++                    "_curation_date"
++                ]
++                .drop_duplicates()
++                .sort_values()
++            )
++
++            n_original_days = len(
++                dates
++            )
++
++            first_date = (
++                dates.min()
++                if n_original_days
++                else pd.NaT
++            )
++
++            last_date = (
++                dates.max()
++                if n_original_days
++                else pd.NaT
++            )
++
++            original_span_days = (
++                int(
++                    (
++                        last_date
++                        - first_date
++                    ).days
++                    + 1
++                )
++                if n_original_days
++                else 0
++            )
++
++            selected_start = pd.NaT
++            selected_end = pd.NaT
++            status = "excluded_min_days"
++
++            retained = capture.iloc[
++                0:0
++            ]
++
++            if (
++                n_original_days
++                >= self.min_observed_days
++            ):
++
++                if (
++                    original_span_days
++                    <= self.max_window_days
++                ):
++
++                    retained = capture
++
++                    selected_start = (
++                        first_date
++                    )
++
++                    selected_end = (
++                        last_date
++                    )
++
++                    status = "retained_full"
++
++                else:
++
++                    window = (
++                        self._first_eligible_window(
++                            dates
++                        )
++                    )
++
++                    if window is not None:
++
++                        (
++                            selected_start,
++                            selected_end,
++                        ) = window
++
++                        retained = capture[
++                            capture[
++                                "_curation_date"
++                            ]
++                            .between(
++                                selected_start,
++                                selected_end,
++                                inclusive="both",
++                            )
++                        ]
++
++                        status = "windowed"
++
++                    else:
++
++                        status = (
++                            "excluded_no_eligible_window"
++                        )
++
++            retained_days = (
++                retained[
++                    "_curation_date"
++                ]
++                .nunique()
++            )
++
++            if not retained.empty:
++
++                retained_frames.append(
++                    retained
++                )
++
++            manifest_rows.append(
++                {
++                    self.schema.group:
++                        point,
++
++                    self.schema.bag:
++                        bag,
++
++                    self.schema.target:
++                        capture[
++                            self.schema.target
++                        ].iloc[
++                            0
++                        ],
++
++                    "status":
++                        status,
++
++                    "original_n_days":
++                        int(
++                            n_original_days
++                        ),
++
++                    "original_first_date":
++                        first_date,
++
++                    "original_last_date":
++                        last_date,
++
++                    "original_span_days":
++                        int(
++                            original_span_days
++                        ),
++
++                    "selected_window_start":
++                        selected_start,
++
++                    "selected_window_end":
++                        selected_end,
++
++                    "retained_n_days":
++                        int(
++                            retained_days
++                        ),
++
++                    "original_n_audio":
++                        int(
++                            len(
++                                capture
++                            )
++                        ),
++
++                    "retained_n_audio":
++                        int(
++                            len(
++                                retained
++                            )
++                        ),
++                }
++            )
++
++        if retained_frames:
++
++            curated = pd.concat(
++                retained_frames,
++                ignore_index=True,
++            )
++
++            curated = (
++                curated.sort_values(
++                    [
++                        self.schema.group,
++                        self.schema.bag,
++                        self.schema.datetime,
++                    ]
++                )
++                .drop(
++                    columns=[
++                        "_curation_date"
++                    ]
++                )
++                .reset_index(
++                    drop=True
++                )
++            )
++
++        else:
++
++            curated = (
++                df.iloc[
++                    0:0
++                ]
++                .drop(
++                    columns=[
++                        "_curation_date"
++                    ]
++                )
++                .reset_index(
++                    drop=True
++                )
++            )
++
++        manifest = (
++            pd.DataFrame(
++                manifest_rows
++            )
++            .sort_values(
++                [
++                    self.schema.group,
++                    self.schema.bag,
++                ]
++            )
++            .reset_index(
++                drop=True
++            )
++        )
++
++        return (
++            curated,
++            manifest,
++        )
++
++    def _first_eligible_window(
++        self,
++        dates: pd.DatetimeIndex,
++    ) -> tuple[pd.Timestamp, pd.Timestamp] | None:
++        """
++        Find the first maximum-length window with enough observed dates.
++        """
++
++        for start in dates:
++
++            end = (
++                pd.Timestamp(
++                    start
++                )
++                + pd.Timedelta(
++                    days=(
++                        self.max_window_days
++                        - 1
++                    )
++                )
++            )
++
++            n_days = int(
++                (
++                    (
++                        dates
++                        >= start
++                    )
++                    & (
++                        dates
++                        <= end
++                    )
++                )
++                .sum()
++            )
++
++            if (
++                n_days
++                >= self.min_observed_days
++            ):
++
++                return (
++                    pd.Timestamp(
++                        start
++                    ),
++                    end,
++                )
++
++        return None
+diff --git a/src/config/settings.py b/src/config/settings.py
+--- a/src/config/settings.py
++++ b/src/config/settings.py
+@@
+ class DataConfig:
+     data_path: str
+     schema_path: str
+     output_dir_base: str
+
+     output_dir: str = field(
+         init=False
+     )
+
++    min_capture_days: int = 7
++    max_capture_window_days: int = 28
++
+@@
+         self._validate_dataset_file()
+         self._validate_schema_file()
+         self._validate_output_base()
++        self._validate_temporal_curation()
+
+         self.output_dir = (
+             self._create_output_dir()
+         )
+@@
+             output_dir_base=str(
+                 config(
+                     "OUTPUT_DIR",
+                     default="output",
+                 )
+             ),
++
++            min_capture_days=config(
++                "MIN_CAPTURE_DAYS",
++                default=7,
++                cast=int,
++            ),
++
++            max_capture_window_days=config(
++                "MAX_CAPTURE_WINDOW_DAYS",
++                default=28,
++                cast=int,
++            ),
+         )
++
++    def _validate_temporal_curation(
++        self,
++    ) -> None:
++
++        if self.min_capture_days < 1:
++            raise ValueError(
++                "MIN_CAPTURE_DAYS must be >= 1."
++            )
++
++        if (
++            self.max_capture_window_days
++            < self.min_capture_days
++        ):
++            raise ValueError(
++                "MAX_CAPTURE_WINDOW_DAYS must be >= "
++                "MIN_CAPTURE_DAYS."
++            )
+@@
+ class ValidationConfig:
+@@
+     test_size: float
++    hfi_strata: int
+
+     cv_splits: int
+     cv_repeats: int
+@@
+         self._validate_test_size()
++        self._validate_hfi_strata()
+         self._validate_cv()
+         self._validate_optuna()
+@@
+             test_size=config(
+                 "TEST_SIZE",
+                 default=0.20,
+                 cast=float,
+             ),
++
++            hfi_strata=config(
++                "HFI_STRATA",
++                default=4,
++                cast=int,
++            ),
+
+             cv_splits=config(
+@@
+     def _validate_test_size(
+         self,
+     ) -> None:
+@@
+                 f"got: {self.test_size}"
+             )
++
++    def _validate_hfi_strata(
++        self,
++    ) -> None:
++
++        if self.hfi_strata < 2:
++            raise ValueError(
++                "HFI_STRATA must be >= 2."
++            )
+diff --git a/src/pipeline.py b/src/pipeline.py
+--- a/src/pipeline.py
++++ b/src/pipeline.py
+@@
+ from .config.settings import Settings
+ from .core.data.data_loader import DataLoader
+ from .core.data.temporal_audit import TemporalAudit
++from .core.data.temporal_curation import TemporalCurator
+@@
+     Steps
+     -----
+     1. Load data and schema.
+     2. Build atomic Audio_Name observations.
+-    3. Audit temporal sampling coverage.
+-    4. Build daily acoustic statistics.
+-    5. Build candidate CapturePointId representations.
+-    6. Select one complete pipeline using repeated grouped CV.
+-    7. Fit the selected pipeline on the complete development set.
+-    8. Evaluate once on the isolated final test set.
+-    9. Build report-oriented scientific analysis tables.
+-    10. Generate publication-oriented figures.
++    3. Apply pre-specified temporal curation per CapturePointId.
++    4. Audit temporal sampling coverage after curation.
++    5. Build daily acoustic statistics.
++    6. Build candidate CapturePointId representations.
++    7. Select one complete pipeline using repeated grouped CV.
++    8. Fit the selected pipeline on the complete development set.
++    9. Evaluate once on the isolated final test set.
++    10. Build report-oriented scientific analysis tables.
++    11. Generate publication-oriented figures.
+@@
+-        audio = processor.prepare_audio(
++        audio_uncurated = processor.prepare_audio(
+             df_raw
+         )
+
++        curator = TemporalCurator(
++            schema=schema,
++            min_observed_days=(
++                self.settings.data.min_capture_days
++            ),
++            max_window_days=(
++                self.settings.data.max_capture_window_days
++            ),
++        )
++
++        (
++            audio,
++            curation_manifest,
++        ) = curator.curate(
++            audio_uncurated
++        )
++
+         daily = processor.prepare_daily(
+             audio
+         )
+@@
+         os.makedirs(
+             reproducibility_dir,
+             exist_ok=True,
+         )
+
++        curation_manifest.to_csv(
++            os.path.join(
++                reproducibility_dir,
++                "temporal_curation_manifest.csv",
++            ),
++            index=False,
++        )
++
++        logger.info(
++            "Temporal curation: %d -> %d CapturePointIds; "
++            "%d -> %d Points; %d CapturePointIds windowed",
++            audio_uncurated[
++                schema.bag
++            ].nunique(),
++            audio[
++                schema.bag
++            ].nunique(),
++            audio_uncurated[
++                schema.group
++            ].nunique(),
++            audio[
++                schema.group
++            ].nunique(),
++            int(
++                (
++                    curation_manifest[
++                        "status"
++                    ]
++                    == "windowed"
++                ).sum()
++            ),
++        )
++
+@@
+             test_size=(
+                 self.settings
+                 .validation
+                 .test_size
+             ),
+
++            hfi_strata=(
++                self.settings
++                .validation
++                .hfi_strata
++            ),
++
+             cv_splits=(
+diff --git a/src/core/evaluation/evaluator.py b/src/core/evaluation/evaluator.py
+--- a/src/core/evaluation/evaluator.py
++++ b/src/core/evaluation/evaluator.py
+@@
+-from sklearn.model_selection import GroupKFold
++from sklearn.model_selection import (
++    GroupKFold,
++    StratifiedShuffleSplit,
++)
+@@
+         cv_repeats: int,
+         optuna_trials: int,
+         selection_indices_candidates: tuple[int, ...] | None = None,
+         selection_embeddings_candidates: tuple[int, ...] | None = None,
++        hfi_strata: int = 4,
+     ) -> None:
+@@
+         self.test_size = test_size
++        self.hfi_strata = hfi_strata
+
+         self.cv_splits = cv_splits
+@@
+     def _make_development_test_split(
+         self,
+         reference: pd.DataFrame,
+@@
+-        points = np.array(
+-            sorted(
+-                reference[
+-                    self.schema.group
+-                ]
+-                .drop_duplicates()
+-                .tolist(),
+-                key=str,
+-            ),
+-            dtype=object,
+-        )
+-
+-        n_points = len(
+-            points
+-        )
++        point_table = (
++            reference.groupby(
++                self.schema.group,
++                as_index=False,
++            )
++            .agg(
++                point_mean_hfi=(
++                    self.schema.target,
++                    "mean",
++                )
++            )
++        )
++
++        point_table[
++            "_point_sort_key"
++        ] = (
++            point_table[
++                self.schema.group
++            ]
++            .map(
++                str
++            )
++        )
++
++        point_table = (
++            point_table.sort_values(
++                "_point_sort_key"
++            )
++            .drop(
++                columns=[
++                    "_point_sort_key"
++                ]
++            )
++            .reset_index(
++                drop=True
++            )
++        )
++
++        n_points = len(
++            point_table
++        )
+@@
+         if (
+             n_test_points
+             >= n_points
+@@
+                 f"TEST_SIZE leaves no Points for development."
+             )
+
+-        rng = np.random.default_rng(
+-            self.random_state
+-        )
+-
+-        shuffled_points = (
+-            rng.permutation(
+-                points
+-            )
+-        )
+-
+-        test_points = set(
+-            shuffled_points[
+-                :n_test_points
+-            ].tolist()
+-        )
+-
+-        development_points = set(
+-            shuffled_points[
+-                n_test_points:
+-            ].tolist()
+-        )
++        n_development_points = (
++            n_points
++            - n_test_points
++        )
++
++        max_strata = min(
++            self.hfi_strata,
++            n_test_points,
++            n_development_points,
++            int(
++                point_table[
++                    "point_mean_hfi"
++                ]
++                .nunique()
++            ),
++        )
++
++        if max_strata < 2:
++            raise ValueError(
++                "At least two HFI strata are required for the "
++                "development/final-test split."
++            )
++
++        strata = None
++
++        for n_strata in range(
++            max_strata,
++            1,
++            -1,
++        ):
++
++            candidate = pd.qcut(
++                point_table[
++                    "point_mean_hfi"
++                ],
++                q=n_strata,
++                labels=False,
++                duplicates="drop",
++            )
++
++            if candidate.isna().any():
++                continue
++
++            counts = (
++                candidate.value_counts()
++            )
++
++            actual_strata = (
++                candidate.nunique()
++            )
++
++            if (
++                actual_strata >= 2
++                and actual_strata <= n_test_points
++                and actual_strata <= n_development_points
++                and counts.min() >= 2
++            ):
++                strata = (
++                    candidate.astype(
++                        int
++                    )
++                )
++                break
++
++        if strata is None:
++            raise ValueError(
++                "Could not construct valid Point-level HFI strata "
++                "for the requested development/final-test split."
++            )
++
++        point_table[
++            "hfi_stratum"
++        ] = strata
++
++        n_effective_strata = int(
++            point_table[
++                "hfi_stratum"
++            ]
++            .nunique()
++        )
++
++        splitter = StratifiedShuffleSplit(
++            n_splits=1,
++            test_size=n_test_points,
++            random_state=(
++                self.random_state
++            ),
++        )
++
++        (
++            development_idx,
++            test_idx,
++        ) = next(
++            splitter.split(
++                point_table,
++                point_table[
++                    "hfi_stratum"
++                ],
++            )
++        )
++
++        development_points = set(
++            point_table.iloc[
++                development_idx
++            ][
++                self.schema.group
++            ]
++            .tolist()
++        )
++
++        test_points = set(
++            point_table.iloc[
++                test_idx
++            ][
++                self.schema.group
++            ]
++            .tolist()
++        )
++
++        logger.info(
++            "Point-level HFI-stratified holdout: "
++            "%d requested strata, %d effective strata",
++            self.hfi_strata,
++            n_effective_strata,
++        )
+@@
+-        manifest = reference[
+-            [
+-                self.schema.group,
+-                self.schema.bag,
+-                self.schema.target,
+-            ]
+-        ].copy()
++        manifest = (
++            reference[
++                [
++                    self.schema.group,
++                    self.schema.bag,
++                    self.schema.target,
++                ]
++            ]
++            .merge(
++                point_table[
++                    [
++                        self.schema.group,
++                        "point_mean_hfi",
++                        "hfi_stratum",
++                    ]
++                ],
++                on=(
++                    self.schema.group
++                ),
++                how="left",
++                validate="many_to_one",
++            )
++        )
+diff --git a/src/config/logging.py b/src/config/logging.py
+--- a/src/config/logging.py
++++ b/src/config/logging.py
+@@
+             (
+                 f"Schema                       : "
+                 f"{self.settings.data.schema_path}"
+             ),
+
++            (
++                f"Minimum capture days         : "
++                f"{self.settings.data.min_capture_days}"
++            ),
++
++            (
++                f"Maximum capture window days  : "
++                f"{self.settings.data.max_capture_window_days}"
++            ),
++
+@@
+             (
+                 f"Test fraction                : "
+                 f"{self.settings.validation.test_size}"
+             ),
+
++            (
++                f"HFI strata                   : "
++                f"{self.settings.validation.hfi_strata}"
++            ),
++
++            (
++                "Stratification target        : "
++                "Point-mean HFI across eligible CapturePointIds"
++            ),
++
+             (
+                 "Split grouping unit          : "
+                 "Point"
+diff --git a/.env.example b/.env.example
+--- a/.env.example
++++ b/.env.example
+@@
+ OUTPUT_DIR=output
+
+
++# =============================================================================
++# TEMPORAL CURATION
++# =============================================================================
++
++# Minimum number of distinct observed days required for one CapturePointId.
++# A day is observed when at least one valid Audio_Name observation is present.
++MIN_CAPTURE_DAYS=7
++
++# Maximum calendar window used to construct one CapturePointId signature.
++# Captures spanning more than this are restricted to the first chronological
++# window containing at least MIN_CAPTURE_DAYS observed days.
++MAX_CAPTURE_WINDOW_DAYS=28
++
++
+ # =============================================================================
+ # PIPELINE SEARCH SPACE
+ # =============================================================================
+@@
+ # Fraction of independent Points reserved for the final test set.
+ TEST_SIZE=0.20
+
++# Number of Point-level HFI quantile strata used by the holdout split.
++HFI_STRATA=4
++
+
+ # =============================================================================
+ # REPEATED GROUPED CROSS-VALIDATION
+diff --git a/tests/test_temporal_curation.py b/tests/test_temporal_curation.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_temporal_curation.py
+@@
++import pandas as pd
++import pytest
++
++from src.core.data.schema import Schema
++from src.core.data.temporal_curation import TemporalCurator
++
++
++@pytest.fixture
++def schema() -> Schema:
++    return Schema(
++        target="meanHFI",
++        group="Point",
++        bag="CapturePointId",
++        audio="Audio_Name",
++        datetime="AudioDate",
++        index_prefixes=("s_", "t_"),
++        embedding="embedding",
++    )
++
++
++def _capture_rows(
++    point: str,
++    bag: str,
++    start: str,
++    day_offsets: list[int],
++) -> list[dict]:
++
++    rows = []
++
++    for offset in day_offsets:
++        datetime = (
++            pd.Timestamp(
++                start
++            )
++            + pd.Timedelta(
++                days=offset,
++                hours=4,
++            )
++        )
++
++        rows.append(
++            {
++                "Point": point,
++                "CapturePointId": bag,
++                "Date": datetime.date(),
++                "Audio_Name": f"{bag}_{offset}",
++                "AudioDate": datetime,
++                "meanHFI": float(
++                    point.removeprefix("P")
++                ),
++            }
++        )
++
++    return rows
++
++
++def test_minimum_days_is_applied_per_capturepoint(
++    schema: Schema,
++) -> None:
++
++    audio = pd.DataFrame(
++        _capture_rows(
++            "P1",
++            "C_short",
++            "2026-01-01",
++            list(
++                range(
++                    6
++                )
++            ),
++        )
++        + _capture_rows(
++            "P1",
++            "C_valid",
++            "2026-01-01",
++            list(
++                range(
++                    7
++                )
++            ),
++        )
++    )
++
++    curated, manifest = TemporalCurator(
++        schema=schema,
++        min_observed_days=7,
++        max_window_days=28,
++    ).curate(
++        audio
++    )
++
++    assert set(
++        curated[
++            "CapturePointId"
++        ]
++    ) == {
++        "C_valid",
++    }
++
++    status = (
++        manifest.set_index(
++            "CapturePointId"
++        )[
++            "status"
++        ]
++        .to_dict()
++    )
++
++    assert status[
++        "C_short"
++    ] == "excluded_min_days"
++
++    assert status[
++        "C_valid"
++    ] == "retained_full"
++
++
++def test_long_capture_uses_first_eligible_28_day_window(
++    schema: Schema,
++) -> None:
++
++    audio = pd.DataFrame(
++        _capture_rows(
++            "P2",
++            "C_long",
++            "2026-01-01",
++            list(
++                range(
++                    35
++                )
++            ),
++        )
++    )
++
++    curated, manifest = TemporalCurator(
++        schema=schema,
++        min_observed_days=7,
++        max_window_days=28,
++    ).curate(
++        audio
++    )
++
++    assert curated[
++        "Date"
++    ].nunique() == 28
++
++    row = manifest.iloc[
++        0
++    ]
++
++    assert row[
++        "status"
++    ] == "windowed"
++
++    assert row[
++        "original_n_days"
++    ] == 35
++
++    assert row[
++        "retained_n_days"
++    ] == 28
++
++    assert row[
++        "selected_window_start"
++    ] == pd.Timestamp(
++        "2026-01-01"
++    )
++
++    assert row[
++        "selected_window_end"
++    ] == pd.Timestamp(
++        "2026-01-28"
++    )
++
++
++def test_capture_without_seven_days_inside_any_28_day_window_is_excluded(
++    schema: Schema,
++) -> None:
++
++    audio = pd.DataFrame(
++        _capture_rows(
++            "P3",
++            "C_sparse",
++            "2026-01-01",
++            [
++                0,
++                5,
++                10,
++                15,
++                20,
++                30,
++                40,
++            ],
++        )
++    )
++
++    curated, manifest = TemporalCurator(
++        schema=schema,
++        min_observed_days=7,
++        max_window_days=28,
++    ).curate(
++        audio
++    )
++
++    assert curated.empty
++
++    assert manifest.iloc[
++        0
++    ][
++        "status"
++    ] == "excluded_no_eligible_window"
+diff --git a/tests/test_pipeline_selection.py b/tests/test_pipeline_selection.py
+--- a/tests/test_pipeline_selection.py
++++ b/tests/test_pipeline_selection.py
+@@
+ def test_development_test_split_is_reproducible(
+     evaluator: ModelEvaluator,
+     reference_data: pd.DataFrame,
+ ) -> None:
+@@
+     pd.testing.assert_frame_equal(
+         first[
+             2
+         ],
+         second[
+             2
+         ],
+     )
++
++
++def test_development_test_split_uses_point_level_hfi_strata(
++    evaluator: ModelEvaluator,
++    reference_data: pd.DataFrame,
++) -> None:
++
++    (
++        _,
++        _,
++        manifest,
++    ) = evaluator._make_development_test_split(
++        reference_data
++    )
++
++    point_manifest = (
++        manifest[
++            [
++                "Point",
++                "point_mean_hfi",
++                "hfi_stratum",
++                "split",
++            ]
++        ]
++        .drop_duplicates(
++            "Point"
++        )
++    )
++
++    assert point_manifest[
++        "hfi_stratum"
++    ].nunique() >= 2
++
++    test_strata = set(
++        point_manifest.loc[
++            point_manifest[
++                "split"
++            ]
++            == "test",
++            "hfi_stratum",
++        ]
++    )
++
++    development_strata = set(
++        point_manifest.loc[
++            point_manifest[
++                "split"
++            ]
++            == "development",
++            "hfi_stratum",
++        ]
++    )
++
++    assert test_strata == development_strata

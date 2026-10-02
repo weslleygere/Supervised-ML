@@ -13,7 +13,10 @@ from sklearn.metrics import (
     r2_score,
     root_mean_squared_error,
 )
-from sklearn.model_selection import GroupKFold
+from sklearn.model_selection import (
+    GroupKFold,
+    StratifiedShuffleSplit,
+)
 
 from src.core.data.schema import Schema
 from src.core.models.definitions import (
@@ -128,6 +131,7 @@ class ModelEvaluator:
         optuna_trials: int,
         selection_indices_candidates: tuple[int, ...] | None = None,
         selection_embeddings_candidates: tuple[int, ...] | None = None,
+        hfi_strata: int = 4,
     ) -> None:
 
         self.schema = schema
@@ -161,6 +165,7 @@ class ModelEvaluator:
         )
 
         self.test_size = test_size
+        self.hfi_strata = hfi_strata
 
         self.cv_splits = cv_splits
         self.cv_repeats = cv_repeats
@@ -971,24 +976,49 @@ class ModelEvaluator:
         pd.DataFrame,
     ]:
 
-        points = np.array(
-            sorted(
-                reference[
-                    self.schema.group
+        point_table = (
+            reference.groupby(
+                self.schema.group,
+                as_index=False,
+            )
+            .agg(
+                point_mean_hfi=(
+                    self.schema.target,
+                    "mean",
+                )
+            )
+        )
+
+        point_table[
+            "_point_sort_key"
+        ] = (
+            point_table[
+                self.schema.group
+            ]
+            .map(
+                str
+            )
+        )
+
+        point_table = (
+            point_table.sort_values(
+                "_point_sort_key"
+            )
+            .drop(
+                columns=[
+                    "_point_sort_key"
                 ]
-                .drop_duplicates()
-                .tolist(),
-                key=str,
-            ),
-            dtype=object,
+            )
+            .reset_index(
+                drop=True
+            )
         )
 
         n_points = len(
-            points
+            point_table
         )
 
         if n_points < 2:
-
             raise ValueError(
                 "At least two independent Points are required."
             )
@@ -1009,31 +1039,118 @@ class ModelEvaluator:
             n_test_points
             >= n_points
         ):
-
             raise ValueError(
                 "TEST_SIZE leaves no Points for development."
             )
 
-        rng = np.random.default_rng(
-            self.random_state
+        n_development_points = (
+            n_points
+            - n_test_points
         )
 
-        shuffled_points = (
-            rng.permutation(
-                points
+        max_strata = min(
+            self.hfi_strata,
+            n_test_points,
+            n_development_points,
+            int(
+                point_table[
+                    "point_mean_hfi"
+                ]
+                .nunique()
+            ),
+        )
+
+        if max_strata < 2:
+            raise ValueError(
+                "At least two HFI strata are required."
+            )
+
+        strata = None
+
+        for n_strata in range(
+            max_strata,
+            1,
+            -1,
+        ):
+
+            candidate = pd.qcut(
+                point_table[
+                    "point_mean_hfi"
+                ],
+                q=n_strata,
+                labels=False,
+                duplicates="drop",
+            )
+
+            if candidate.isna().any():
+                continue
+
+            counts = (
+                candidate.value_counts()
+            )
+
+            actual_strata = int(
+                candidate.nunique()
+            )
+
+            if (
+                actual_strata >= 2
+                and actual_strata <= n_test_points
+                and actual_strata <= n_development_points
+                and counts.min() >= 2
+            ):
+                strata = (
+                    candidate.astype(
+                        int
+                    )
+                )
+                break
+
+        if strata is None:
+            raise ValueError(
+                "Could not construct valid Point-level HFI strata."
+            )
+
+        point_table[
+            "hfi_stratum"
+        ] = strata
+
+        splitter = StratifiedShuffleSplit(
+            n_splits=1,
+            test_size=n_test_points,
+            random_state=(
+                self.random_state
+            ),
+        )
+
+        (
+            development_idx,
+            test_idx,
+        ) = next(
+            splitter.split(
+                point_table,
+                point_table[
+                    "hfi_stratum"
+                ],
             )
         )
 
-        test_points = set(
-            shuffled_points[
-                :n_test_points
-            ].tolist()
+        development_points = set(
+            point_table.iloc[
+                development_idx
+            ][
+                self.schema.group
+            ]
+            .tolist()
         )
 
-        development_points = set(
-            shuffled_points[
-                n_test_points:
-            ].tolist()
+        test_points = set(
+            point_table.iloc[
+                test_idx
+            ][
+                self.schema.group
+            ]
+            .tolist()
         )
 
         development = reference[
@@ -1064,13 +1181,29 @@ class ModelEvaluator:
             ].tolist()
         )
 
-        manifest = reference[
-            [
-                self.schema.group,
-                self.schema.bag,
-                self.schema.target,
+        manifest = (
+            reference[
+                [
+                    self.schema.group,
+                    self.schema.bag,
+                    self.schema.target,
+                ]
             ]
-        ].copy()
+            .merge(
+                point_table[
+                    [
+                        self.schema.group,
+                        "point_mean_hfi",
+                        "hfi_stratum",
+                    ]
+                ],
+                on=(
+                    self.schema.group
+                ),
+                how="left",
+                validate="many_to_one",
+            )
+        )
 
         manifest[
             "split"

@@ -4,6 +4,7 @@ import os
 from .config.settings import Settings
 from .core.data.data_loader import DataLoader
 from .core.data.temporal_audit import TemporalAudit
+from .core.data.temporal_curation import TemporalCurator
 from .core.evaluation.evaluator import ModelEvaluator
 from .core.evaluation.plots import save_evaluation_plots
 from .core.evaluation.result_analysis import (
@@ -86,8 +87,25 @@ class Pipeline:
             schema=schema
         )
 
-        audio = processor.prepare_audio(
+        audio_uncurated = processor.prepare_audio(
             df_raw
+        )
+
+        curator = TemporalCurator(
+            schema=schema,
+            min_observed_days=(
+                self.settings.data.min_capture_days
+            ),
+            max_window_days=(
+                self.settings.data.max_capture_window_days
+            ),
+        )
+
+        (
+            audio,
+            curation_manifest,
+        ) = curator.curate(
+            audio_uncurated
         )
 
         daily = processor.prepare_daily(
@@ -112,6 +130,39 @@ class Pipeline:
         os.makedirs(
             reproducibility_dir,
             exist_ok=True,
+        )
+
+        curation_manifest.to_csv(
+            os.path.join(
+                reproducibility_dir,
+                "temporal_curation_manifest.csv",
+            ),
+            index=False,
+        )
+
+        logger.info(
+            "Temporal curation: %d -> %d CapturePointIds; "
+            "%d -> %d Points; %d CapturePointIds windowed",
+            audio_uncurated[
+                schema.bag
+            ].nunique(),
+            audio[
+                schema.bag
+            ].nunique(),
+            audio_uncurated[
+                schema.group
+            ].nunique(),
+            audio[
+                schema.group
+            ].nunique(),
+            int(
+                (
+                    curation_manifest[
+                        "status"
+                    ]
+                    == "windowed"
+                ).sum()
+            ),
         )
 
         audit[
@@ -299,6 +350,12 @@ class Pipeline:
                 self.settings
                 .validation
                 .test_size
+            ),
+
+            hfi_strata=(
+                self.settings
+                .validation
+                .hfi_strata
             ),
 
             cv_splits=(
